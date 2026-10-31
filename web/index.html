@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- After this page loads, the browser itself refuses every network request
+     (connect-src 'none'), so documents cannot be sent anywhere. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval'; worker-src blob:; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>xxf — compare Word documents</title>
+<style>
+  :root {
+    --bg: #fbfaf8; --fg: #1d1d1b; --muted: #6b6a66; --line: #e2dfd8; --panel: #ffffff;
+    --del: #b3261e; --del-bg: #fbe9e7; --ins: #1b6e3c; --ins-bg: #e5f4ea;
+    --fmt: #8a5a00; --fmt-bg: #fdf3dc; --mv: #1c5d99; --accent: #1c5d99;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161614; --fg: #e9e7e2; --muted: #9b9890; --line: #33322e; --panel: #1e1e1b;
+      --del: #ff8a80; --del-bg: #3a1f1d; --ins: #7fd79b; --ins-bg: #1b3324;
+      --fmt: #f0c36b; --fmt-bg: #3a3020; --mv: #8ab8f0; --accent: #8ab8f0;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .tagline { color: var(--muted); margin: 0 0 24px; }
+  .privacy { border: 1px solid var(--line); background: var(--panel); border-radius: 8px;
+             padding: 10px 14px; margin-bottom: 24px; font-size: 14px; }
+  .privacy summary { cursor: pointer; font-weight: 600; }
+  .privacy ul { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
+  .pick { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 600px) { .pick { grid-template-columns: 1fr; } }
+  .drop { border: 2px dashed var(--line); border-radius: 10px; padding: 18px; background: var(--panel);
+          cursor: pointer; min-height: 92px; transition: border-color .15s; }
+  .drop.over, .drop:hover { border-color: var(--accent); }
+  .drop .which { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .drop .name { font-weight: 600; margin-top: 6px; word-break: break-all; }
+  .drop .hint { color: var(--muted); font-size: 14px; margin-top: 6px; }
+  .drop input { display: none; }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 16px 0 24px; }
+  .controls label { color: var(--muted); font-size: 14px; }
+  .controls input[type=text] { font: inherit; padding: 6px 8px; border: 1px solid var(--line);
+                               border-radius: 6px; background: var(--panel); color: var(--fg); width: 180px; }
+  button { font: inherit; font-weight: 600; padding: 8px 16px; border-radius: 8px; border: 1px solid var(--accent);
+           background: var(--accent); color: var(--bg); cursor: pointer; }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  .status { color: var(--muted); font-size: 14px; }
+  .status.error { color: var(--del); }
+  .summary { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: baseline; margin-bottom: 12px; }
+  .summary .n { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .summary .k { color: var(--muted); font-size: 13px; margin-left: 4px; }
+  #report { white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.55 ui-monospace, "SF Mono", Menlo, monospace;
+            background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
+  #report .del { color: var(--del); background: var(--del-bg); text-decoration: line-through; }
+  #report .ins { color: var(--ins); background: var(--ins-bg); }
+  #report .fmt { color: var(--fmt); background: var(--fmt-bg); text-decoration: underline dotted; }
+  #report .mv { color: var(--mv); }
+  #report .dim { color: var(--muted); }
+  .legend { color: var(--muted); font-size: 13px; margin: 0 0 8px; }
+  .legend span { padding: 0 4px; border-radius: 3px; }
+  footer { margin-top: 40px; color: var(--muted); font-size: 12px; }
+  footer code { font-size: 11px; word-break: break-all; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>xxf</h1>
+  <p class="tagline">Compare two Word documents and get a redline with tracked changes.</p>
+
+  <details class="privacy">
+    <summary>Your documents never leave this device</summary>
+    <ul>
+      <li>Everything runs in your browser, in WebAssembly compiled from the open-source xxf Rust code.</li>
+      <li>The page's security policy forbids all network connections, so the browser blocks any attempt to send data.
+          You can confirm this in your browser's developer tools (Network tab).</li>
+      <li>This page is a single self-contained file: save it and it works offline.</li>
+    </ul>
+  </details>
+
+  <div class="pick">
+    <label class="drop" id="drop-old">
+      <div class="which">Original</div>
+      <div class="name" data-name>No file chosen</div>
+      <div class="hint">Drop a .docx here, or click to choose</div>
+      <input type="file" id="file-old" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
+    </label>
+    <label class="drop" id="drop-new">
+      <div class="which">Revised</div>
+      <div class="name" data-name>No file chosen</div>
+      <div class="hint">Drop a .docx here, or click to choose</div>
+      <input type="file" id="file-new" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
+    </label>
+  </div>
+
+  <div class="controls">
+    <button id="compare" disabled>Compare</button>
+    <label for="author">Author for tracked changes</label>
+    <input type="text" id="author" value="xxf" autocomplete="name">
+    <span class="status" id="status"></span>
+  </div>
+
+  <section id="result" hidden>
+    <div class="summary" id="summary"></div>
+    <div class="controls">
+      <button id="download" class="secondary">Download redline (.docx)</button>
+    </div>
+    <p class="legend">
+      <span style="color:var(--del);background:var(--del-bg);text-decoration:line-through">deleted</span>
+      <span style="color:var(--ins);background:var(--ins-bg)">inserted</span>
+      <span style="color:var(--fmt);background:var(--fmt-bg);text-decoration:underline dotted">reformatted</span>
+      <span style="color:var(--mv)">moved</span>
+      · ¶ paragraph, T table, r/c row/column
+    </p>
+    <div id="report"></div>
+  </section>
+
+  <footer>
+    xxf {{VERSION}} · build {{COMMIT}} · {{BUILD_DATE}}<br>
+    WebAssembly SHA-256: <code>{{WASM_SHA256}}</code>
+  </footer>
+</main>
+
+<!-- The compiled xxf engine, base64-encoded. -->
+<script type="application/octet-stream" id="wasm">
+{{WASM_BASE64}}
+</script>
+
+<!-- Runs in a Web Worker so large documents don't freeze the page. -->
+<script type="text/plain" id="worker-src">
+let module;
+self.onmessage = async ({ data }) => {
+  try {
+    module ??= await WebAssembly.compile(data.wasm);
+    // A fresh instance per comparison: a failure (trap) can't affect the next one.
+    const { exports: x } = await WebAssembly.instantiate(module, {});
+    const put = (bytes) => {
+      const ptr = x.alloc(bytes.length);
+      new Uint8Array(x.memory.buffer, ptr, bytes.length).set(bytes);
+      return [ptr, bytes.length];
+    };
+    const enc = new TextEncoder();
+    const ok = x.compare(
+      ...put(new Uint8Array(data.old)), ...put(new Uint8Array(data.new)),
+      ...put(enc.encode(data.author)), ...put(enc.encode(data.date)), 1);
+    // Memory may have grown during compare: take views only now.
+    const get = (i) => new Uint8Array(x.memory.buffer, x.result_ptr(i), x.result_len(i)).slice();
+    const dec = new TextDecoder();
+    if (!ok) throw new Error(dec.decode(get(3)));
+    const redline = get(1);
+    self.postMessage({ report: dec.decode(get(0)), redline, stats: JSON.parse(dec.decode(get(2))) },
+                     [redline.buffer]);
+  } catch (e) {
+    const msg = e instanceof WebAssembly.RuntimeError ? `internal error (${e.message})` : e.message;
+    self.postMessage({ error: msg });
+  }
+};
+</script>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const wasm = Uint8Array.from(atob($("wasm").textContent.trim()), (c) => c.charCodeAt(0));
+const worker = new Worker(URL.createObjectURL(
+  new Blob([$("worker-src").textContent], { type: "text/javascript" })));
+
+const files = { old: null, new: null };
+let redlineUrl = null;
+
+try { $("author").value = localStorage.getItem("xxf-author") || $("author").value; } catch {}
+$("author").addEventListener("change", () => {
+  try { localStorage.setItem("xxf-author", $("author").value); } catch {}
+});
+
+for (const which of ["old", "new"]) {
+  const drop = $(`drop-${which}`), input = $(`file-${which}`);
+  const set = (file) => {
+    if (!file) return;
+    files[which] = file;
+    drop.querySelector("[data-name]").textContent = file.name;
+    $("compare").disabled = !(files.old && files.new);
+  };
+  input.addEventListener("change", () => set(input.files[0]));
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (e) => {
+    e.preventDefault(); drop.classList.remove("over"); set(e.dataTransfer.files[0]);
+  });
+}
+
+function status(text, error = false) {
+  $("status").textContent = text;
+  $("status").classList.toggle("error", error);
+}
+
+$("compare").addEventListener("click", async () => {
+  $("compare").disabled = true;
+  $("result").hidden = true;
+  status("Comparing…");
+  const started = performance.now();
+  const [oldBuf, newBuf] = await Promise.all([files.old.arrayBuffer(), files.new.arrayBuffer()]);
+  worker.onmessage = ({ data }) => {
+    $("compare").disabled = false;
+    if (data.error) { status(data.error, true); return; }
+    const secs = ((performance.now() - started) / 1000).toFixed(2);
+    status(`Done in ${secs} s`);
+    const s = data.stats;
+    const stat = (n, k) => `<span><span class="n">${n}</span><span class="k">${k}</span></span>`;
+    $("summary").innerHTML = stat(s.changed, "changed") + stat(s.inserted, "inserted") +
+      stat(s.deleted, "deleted") + stat(s.moved, "moved") +
+      (s.blank ? stat(s.blank, "empty paragraphs") : "");
+    // The report is HTML built by xxf, with all document text escaped.
+    $("report").innerHTML = data.report;
+    if (redlineUrl) URL.revokeObjectURL(redlineUrl);
+    redlineUrl = URL.createObjectURL(new Blob([data.redline],
+      { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }));
+    $("result").hidden = false;
+  };
+  worker.postMessage({ wasm, old: oldBuf, new: newBuf, author: $("author").value || "xxf",
+                       date: new Date().toISOString().replace(/\.\d+Z$/, "Z") }, [oldBuf, newBuf]);
+});
+
+$("download").addEventListener("click", () => {
+  const a = document.createElement("a");
+  a.href = redlineUrl;
+  a.download = `${files.new.name.replace(/\.docx$/i, "")} (redline).docx`;
+  a.click();
+});
+</script>
+</body>
+</html>

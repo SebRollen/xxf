@@ -1,0 +1,12 @@
+[package]
+name = "xxf-web"
+version = "0.1.0"
+edition = "2024"
+description = "WebAssembly entry points for the xxf web page"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+xxf = { path = ".." }

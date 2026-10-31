@@ -244,3 +244,12 @@ fn first_line_indent_replaces_inherited_hanging_indent() {
     let items = diff_blocks(&a.blocks, &b.blocks);
     assert_eq!(stats(&a.blocks, &b.blocks, &items), Stats::default());
 }
+
+#[test]
+fn html_report_escapes_document_text() {
+    let (a, b, items) = compare(&p("Use a &lt;b&gt; tag &amp; more."), &p("Use an &lt;i&gt; tag &amp; more."));
+    let html = render(&a, &b, &items, &Style::HTML);
+    assert!(html.contains("&lt;"), "{html}");
+    assert!(!html.contains("<b>") && !html.contains("<i>"), "{html}");
+    assert!(html.contains(r#"<span class="del">"#) && html.contains(r#"<span class="ins">"#), "{html}");
+}

@@ -175,6 +175,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "xxf-web"
+version = "0.1.0"
+dependencies = [
+ "xxf",
+]
+
+[[package]]
 name = "zip"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

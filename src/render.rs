@@ -1,4 +1,5 @@
-//! Human-readable text report of a comparison.
+//! Human-readable report of a comparison: plain or colored text for the
+//! terminal, or an HTML fragment (for the web page) from the same logic.
 
 use std::fmt::Write;
 
@@ -12,11 +13,20 @@ pub struct Style {
     pub fmt: &'static str,
     pub mv: &'static str,
     pub dim: &'static str,
+    /// Ends any of the above.
     pub reset: &'static str,
+    /// Text markers around deleted, inserted and reformatted text:
+    /// [del open, del close, ins open, ins close, fmt open, fmt close].
+    pub marks: [&'static str; 6],
+    /// Escape document text for HTML.
+    pub html: bool,
 }
 
+const TEXT_MARKS: [&str; 6] = ["[-", "-]", "{+", "+}", "{~", "~}"];
+
 impl Style {
-    pub const PLAIN: Style = Style { del: "", ins: "", fmt: "", mv: "", dim: "", reset: "" };
+    pub const PLAIN: Style =
+        Style { del: "", ins: "", fmt: "", mv: "", dim: "", reset: "", marks: TEXT_MARKS, html: false };
     pub const COLOR: Style = Style {
         del: "\x1b[31m",
         ins: "\x1b[32m",
@@ -24,6 +34,20 @@ impl Style {
         mv: "\x1b[36m",
         dim: "\x1b[2m",
         reset: "\x1b[0m",
+        marks: TEXT_MARKS,
+        html: false,
+    };
+    /// An HTML fragment meant for a `white-space: pre-wrap` container, with
+    /// `del`, `ins`, `fmt`, `mv` and `dim` classes to style.
+    pub const HTML: Style = Style {
+        del: r#"<span class="del">"#,
+        ins: r#"<span class="ins">"#,
+        fmt: r#"<span class="fmt">"#,
+        mv: r#"<span class="mv">"#,
+        dim: r#"<span class="dim">"#,
+        reset: "</span>",
+        marks: ["", "", "", "", "", ""],
+        html: true,
     };
 }
 
@@ -42,7 +66,10 @@ pub fn render(old: &Document, new: &Document, items: &[BlockItem], st: &Style) -
         let _ = write!(
             r.out,
             "\n{} changed, {} inserted, {} deleted, {} moved",
-            s.changed, s.inserted, s.deleted, s.moved
+            s.changed,
+            s.inserted,
+            s.deleted,
+            s.moved
         );
         if s.blank > 0 {
             let _ = write!(r.out, " ({} empty paragraphs added/removed, not shown)", s.blank);
@@ -59,7 +86,25 @@ struct Renderer<'s> {
 
 impl Renderer<'_> {
     fn line(&mut self, indent: usize, color: &str, text: std::fmt::Arguments) {
-        let _ = writeln!(self.out, "{:w$}{color}{text}{}", "", self.st.reset, w = indent * 2);
+        let reset = if color.is_empty() { "" } else { self.st.reset };
+        let _ = writeln!(self.out, "{:w$}{color}{text}{reset}", "", w = indent * 2);
+    }
+
+    /// Document-derived text, escaped for the output format.
+    fn esc(&self, s: String) -> String {
+        if self.st.html { escape_html(&s) } else { s }
+    }
+
+    fn label(&self, blocks: &[Block], i: usize) -> String {
+        self.esc(label(blocks, i))
+    }
+
+    fn summary(&self, b: &Block) -> String {
+        self.esc(summary(b))
+    }
+
+    fn row_text(&self, r: &Row) -> String {
+        self.esc(row_text(r))
     }
 
     fn blocks(&mut self, old: &[Block], new: &[Block], items: &[BlockItem], prefix: &str, indent: usize) {
@@ -71,25 +116,25 @@ impl Renderer<'_> {
                 Step::Deleted(i) if is_blank(&old[i]) => {}
                 Step::Inserted(j) if is_blank(&new[j]) => {}
                 Step::Deleted(i) => {
-                    self.line(indent, st.del, format_args!("- {prefix}{}: {}", label(old, i), summary(&old[i])))
+                    self.line(indent, st.del, format_args!("- {prefix}{}: {}", self.label(old, i), self.summary(&old[i])))
                 }
                 Step::Inserted(j) => {
-                    self.line(indent, st.ins, format_args!("+ {prefix}{}: {}", label(new, j), summary(&new[j])))
+                    self.line(indent, st.ins, format_args!("+ {prefix}{}: {}", self.label(new, j), self.summary(&new[j])))
                 }
                 Step::MovedOut(i, j) => self.line(
                     indent,
                     st.mv,
-                    format_args!("» {prefix}{} moved to {}: {}", label(old, i), label(new, j), summary(&old[i])),
+                    format_args!("» {prefix}{} moved to {}: {}", self.label(old, i), self.label(new, j), self.summary(&old[i])),
                 ),
                 Step::MovedIn(i, j) => {
-                    let head = format!("« {prefix}{} moved from {}", label(new, j), label(old, i));
+                    let head = format!("« {prefix}{} moved from {}", self.label(new, j), self.label(old, i));
                     match &it.detail {
                         Some(d) => self.detail(&old[i], &new[j], d, &head, prefix, indent),
                         None => self.line(indent, st.mv, format_args!("{head}")),
                     }
                 }
                 Step::Changed(i, j) => {
-                    let head = format!("~ {prefix}{}→{}", label(old, i), label(new, j));
+                    let head = format!("~ {prefix}{}→{}", self.label(old, i), self.label(new, j));
                     if let Some(d) = &it.detail {
                         self.detail(&old[i], &new[j], d, &head, prefix, indent);
                     }
@@ -108,11 +153,11 @@ impl Renderer<'_> {
                 }
                 if d.ppr_changed {
                     notes.push(match (&a.style, &b.style) {
-                        (x, y) if x != y => format!(
+                        (x, y) if x != y => self.esc(format!(
                             "paragraph style {} → {}",
                             x.as_deref().unwrap_or("none"),
                             y.as_deref().unwrap_or("none")
-                        ),
+                        )),
                         _ => "paragraph formatting changed".to_string(),
                     });
                 }
@@ -135,12 +180,12 @@ impl Renderer<'_> {
         for Item { step, detail } in &d.rows {
             match *step {
                 Step::Equal(..) => {}
-                Step::Deleted(i) => self.line(indent, st.del, format_args!("- {prefix}row {}: {}", i + 1, row_text(&a.rows[i]))),
-                Step::Inserted(j) => self.line(indent, st.ins, format_args!("+ {prefix}row {}: {}", j + 1, row_text(&b.rows[j]))),
+                Step::Deleted(i) => self.line(indent, st.del, format_args!("- {prefix}row {}: {}", i + 1, self.row_text(&a.rows[i]))),
+                Step::Inserted(j) => self.line(indent, st.ins, format_args!("+ {prefix}row {}: {}", j + 1, self.row_text(&b.rows[j]))),
                 Step::MovedOut(i, j) => self.line(
                     indent,
                     st.mv,
-                    format_args!("» {prefix}row {} moved to row {}: {}", i + 1, j + 1, row_text(&a.rows[i])),
+                    format_args!("» {prefix}row {} moved to row {}: {}", i + 1, j + 1, self.row_text(&a.rows[i])),
                 ),
                 Step::MovedIn(i, j) | Step::Changed(i, j) => {
                     if matches!(step, Step::MovedIn(..)) {
@@ -148,8 +193,8 @@ impl Renderer<'_> {
                     }
                     match detail {
                         Some(RowDetail::Restructured) => {
-                            self.line(indent, st.del, format_args!("- {prefix}row {}: {}", i + 1, row_text(&a.rows[i])));
-                            self.line(indent, st.ins, format_args!("+ {prefix}row {}: {}", j + 1, row_text(&b.rows[j])));
+                            self.line(indent, st.del, format_args!("- {prefix}row {}: {}", i + 1, self.row_text(&a.rows[i])));
+                            self.line(indent, st.ins, format_args!("+ {prefix}row {}: {}", j + 1, self.row_text(&b.rows[j])));
                         }
                         Some(RowDetail::Cells { props_changed, cells }) => {
                             if *props_changed {
@@ -180,27 +225,29 @@ impl Renderer<'_> {
         let st = self.st;
         let all_reformatted = d.spans.iter().any(|s| s.kind == SpanKind::Reformat)
             && !d.spans.iter().any(|s| s.kind == SpanKind::Same);
+        let [d0, d1, i0, i1, f0, f1] = st.marks;
+        let text = |p: &Para, r: &std::ops::Range<usize>| self.esc(show(p.slice(r.clone())));
         let mut s = String::new();
         let n = d.spans.len();
         for (k, sp) in d.spans.iter().enumerate() {
             match sp.kind {
                 SpanKind::Same => {
                     let t = show(a.slice(sp.old.clone()));
-                    s.push_str(&elide(&t, k > 0, k + 1 < n));
+                    s.push_str(&self.esc(elide(&t, k > 0, k + 1 < n)));
                 }
                 SpanKind::Reformat if all_reformatted => {
                     let t = show(b.slice(sp.new.clone()));
-                    s.push_str(&elide(&t, k > 0, k + 1 < n));
+                    s.push_str(&self.esc(elide(&t, k > 0, k + 1 < n)));
                 }
                 SpanKind::Reformat => {
-                    let _ = write!(s, "{}{{~{}~}}{}", st.fmt, show(b.slice(sp.new.clone())), st.reset);
+                    let _ = write!(s, "{}{f0}{}{f1}{}", st.fmt, text(b, &sp.new), st.reset);
                 }
                 SpanKind::Replace => {
                     if !sp.old.is_empty() {
-                        let _ = write!(s, "{}[-{}-]{}", st.del, show(a.slice(sp.old.clone())), st.reset);
+                        let _ = write!(s, "{}{d0}{}{d1}{}", st.del, text(a, &sp.old), st.reset);
                     }
                     if !sp.new.is_empty() {
-                        let _ = write!(s, "{}{{+{}+}}{}", st.ins, show(b.slice(sp.new.clone())), st.reset);
+                        let _ = write!(s, "{}{i0}{}{i1}{}", st.ins, text(b, &sp.new), st.reset);
                     }
                 }
             }
@@ -244,6 +291,20 @@ fn row_text(r: &Row) -> String {
         })
         .collect();
     truncate(&cells.join(" | "), SUMMARY)
+}
+
+fn escape_html(s: &str) -> String {
+    let mut o = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => o.push_str("&amp;"),
+            '<' => o.push_str("&lt;"),
+            '>' => o.push_str("&gt;"),
+            '"' => o.push_str("&quot;"),
+            c => o.push(c),
+        }
+    }
+    o
 }
 
 /// Make invisible characters visible.

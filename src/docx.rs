@@ -56,7 +56,7 @@ pub fn load_bytes_with(bytes: Vec<u8>, mode: Revisions) -> Result<Source> {
     if bytes.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) {
         return Err("not a .docx package (encrypted document, or a legacy .doc file)".into());
     }
-    let mut zip = ZipArchive::new(Cursor::new(&bytes))?;
+    let mut zip = ZipArchive::new(Cursor::new(&bytes)).map_err(|e| format!("not a .docx file ({e})"))?;
     let main = main_part(&mut zip);
     let main_rels = rels_part(&main);
     let base = dir_of(&main).to_string();
