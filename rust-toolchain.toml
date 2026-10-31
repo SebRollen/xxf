@@ -1,0 +1,6 @@
+# Pinned so local builds and the GitHub Pages build compile the same engine.
+[toolchain]
+channel = "1.91.0"
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"
+components = ["clippy"]

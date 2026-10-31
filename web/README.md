@@ -29,3 +29,11 @@ that an attempted upload is blocked. `SCREENSHOT=out.png` saves a screenshot.
 - `src/lib.rs`: WebAssembly exports (`alloc`, `compare`, `result_ptr`, `result_len`)
 - `build.sh`: builds `dist/xxf.html` (git-ignored)
 - `test/e2e.mjs`: end-to-end check in headless Chrome
+
+## Deployment
+
+`.github/workflows/pages.yml` runs the tests, builds the page and publishes it
+to GitHub Pages on every push to `main` (Settings ▸ Pages ▸ Source: GitHub
+Actions). The custom domain `xxf.rollen.io` is set in Settings ▸ Pages, with a
+DNS CNAME record `xxf.rollen.io → sebrollen.github.io`. The Rust toolchain is
+pinned in `rust-toolchain.toml` so CI builds the same engine as local builds.

@@ -1,0 +1,64 @@
+# Build the web page from this commit and publish it to GitHub Pages.
+# The live site therefore always matches main; its footer shows the commit
+# and the engine's SHA-256, which this run's log also prints.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; a newer push supersedes a queued one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup is preinstalled; rust-toolchain.toml selects the pinned
+      # toolchain and the wasm target.
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+
+      - name: Test
+        run: cargo test --workspace --release
+
+      - name: Build page
+        run: ./web/build.sh
+
+      - name: Prepare site
+        run: |
+          mkdir _site
+          cp web/dist/xxf.html _site/index.html
+          shasum -a 256 _site/index.html
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
