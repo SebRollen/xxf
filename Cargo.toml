@@ -4,3 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+quick-xml = "0.37"
+rustc-hash = "2"
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
