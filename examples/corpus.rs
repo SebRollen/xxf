@@ -46,7 +46,7 @@ fn main() {
     for (a, b) in &pairs {
         total += 1;
         let label = format!("{} → {}", name(a), name(b));
-        match catch_unwind(AssertUnwindSafe(|| check(a, b, verbose))) {
+        match catch_unwind(AssertUnwindSafe(|| check(a, b))) {
             Ok(Ok(line)) => {
                 ok += 1;
                 if verbose {
@@ -137,7 +137,7 @@ fn part(bytes: &[u8], name: &str) -> Result<String, String> {
     Ok(s)
 }
 
-fn check(a: &Path, b: &Path, verbose: bool) -> Result<String, String> {
+fn check(a: &Path, b: &Path) -> Result<String, String> {
     let (ab, bb) = (std::fs::read(a).map_err(|e| format!("read: {e}"))?, std::fs::read(b).map_err(|e| format!("read: {e}"))?);
     let t0 = Instant::now();
     let old = load_bytes_with(ab, Revisions::Accept).map_err(|e| format!("parse old: {e}"))?;
@@ -182,7 +182,7 @@ fn check(a: &Path, b: &Path, verbose: bool) -> Result<String, String> {
         }
     }
     if let Ok(dir) = std::env::var("XXF_KEEP")
-        && verbose
+        && a != b
     {
         let _ = std::fs::write(Path::new(&dir).join(format!("{}__{}", name(a).trim_end_matches(".docx"), name(b))), &out);
     }

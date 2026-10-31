@@ -310,6 +310,12 @@ impl<'a> Parser<'a> {
                         let stag_end = self.pos();
                         let mut tcpr = None;
                         let (blocks, end) = self.blocks(b"w:tc", &mut tcpr)?;
+                        // A cell-level revision (w:cellIns / w:cellDel in w:tcPr)
+                        // removes the whole cell in one of the modes.
+                        let marker = if self.mode == Revisions::Accept { "<w:cellDel" } else { "<w:cellIns" };
+                        if tcpr.as_ref().is_some_and(|t: &(u64, Src)| self.xml[t.1.start as usize..t.1.end as usize].contains(marker)) {
+                            continue;
+                        }
                         let mut c = Cell::new(blocks, tcpr.as_ref().map_or(0, |t| t.0));
                         c.span = s..self.pos();
                         // Content starts after w:tcPr, so nothing is ever emitted before it.

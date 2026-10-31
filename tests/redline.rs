@@ -232,6 +232,132 @@ fn byte_order_mark_and_unconventional_main_part() {
     assert!(part(&out, "word/trial.xml").contains("<w:delText"));
 }
 
+const FOOTNOTE_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes";
+const HYPERLINK_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
+
+fn rels_xml(entries: &[(&str, &str, &str, bool)]) -> Vec<u8> {
+    let mut x = String::from(r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#);
+    for (id, typ, target, external) in entries {
+        let mode = if *external { r#" TargetMode="External""# } else { "" };
+        x.push_str(&format!(r#"<Relationship Id="{id}" Type="{typ}" Target="{target}"{mode}/>"#));
+    }
+    x.push_str("</Relationships>");
+    x.into_bytes()
+}
+
+fn footnotes_xml(notes: &str) -> Vec<u8> {
+    format!(
+        r#"<?xml version="1.0"?><w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>{notes}</w:footnotes>"#
+    )
+    .into_bytes()
+}
+
+#[test]
+fn deleted_footnote_with_a_link_keeps_its_relationship() {
+    let note = r#"<w:footnote w:id="1"><w:p><w:hyperlink r:id="rId9"><w:r><w:t>see example.com</w:t></w:r></w:hyperlink></w:p></w:footnote>"#;
+    let old = docx_with_parts(
+        r#"<w:p><w:r><w:t>Claim</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:t xml:space="preserve"> stays.</w:t></w:r></w:p>"#,
+        None,
+        &[
+            ("word/_rels/document.xml.rels", &rels_xml(&[("rId3", FOOTNOTE_REL, "footnotes.xml", false)])),
+            ("word/footnotes.xml", &footnotes_xml(note)),
+            ("word/_rels/footnotes.xml.rels", &rels_xml(&[("rId9", HYPERLINK_REL, "https://example.com/", true)])),
+        ],
+    );
+    let new = docx_with_parts(
+        &p("Claim stays."),
+        None,
+        &[
+            ("word/_rels/document.xml.rels", &rels_xml(&[("rId3", FOOTNOTE_REL, "footnotes.xml", false)])),
+            ("word/footnotes.xml", &footnotes_xml("")),
+        ],
+    );
+    let (out, xml) = roundtrip_bytes(&old, &new);
+    assert!(xml.contains(r#"<w:footnoteReference w:id="1"/>"#), "{xml}");
+    let notes = part(&out, "word/footnotes.xml");
+    assert!(notes.contains(r#"<w:hyperlink r:id="rIdXxf1">"#), "{notes}");
+    assert!(part(&out, "word/_rels/footnotes.xml.rels").contains("https://example.com/"));
+}
+
+#[test]
+fn old_cell_and_row_revisions_are_resolved_not_copied() {
+    // Old: one cell inserted (w:cellIns) and one row inserted (trPr/w:ins), both accepted.
+    let cell = |marker: &str, text: &str| format!(r#"<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/>{marker}</w:tcPr>{}</w:tc>"#, p(text));
+    let old = format!(
+        r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid><w:tr>{}{}</w:tr><w:tr><w:trPr><w:ins w:id="7" w:author="a"/></w:trPr>{}{}</w:tr></w:tbl>"#,
+        cell("", "Alpha cell text"),
+        cell(r#"<w:cellIns w:id="8" w:author="a"/>"#, "Inserted cell"),
+        cell("", "Row two"),
+        cell("", "more")
+    );
+    roundtrip(&old, &p("All replaced by one paragraph."));
+}
+
+#[test]
+fn cell_ending_in_a_nested_table_stays_valid_when_deleted() {
+    let inner = table(&[&["inner"]]);
+    let old = format!(r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol/></w:tblGrid><w:tr><w:tc><w:tcPr/>{inner}</w:tc></w:tr></w:tbl>"#);
+    let xml = roundtrip(&old, &p("Gone."));
+    assert!(xml.contains("<w:tc><w:tcPr/><w:tbl>"), "{xml}");
+}
+
+#[test]
+fn internal_non_part_relationship_carries_over() {
+    // A picture whose click jumps to a bookmark: an internal target that isn't a part.
+    let link = |rid: &str, text: &str| {
+        format!(
+            r#"<w:p><w:r><w:t xml:space="preserve">{text} </w:t></w:r><w:r><w:drawing><wp:inline><wp:docPr id="1" name="x"><a:hlinkClick xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" r:id="{rid}"/></wp:docPr></wp:inline></w:drawing></w:r></w:p>"#
+        )
+    };
+    let old = docx_with_parts(
+        &[p("Keep."), link("rId4", "Old words before the link")].concat(),
+        None,
+        &[("word/_rels/document.xml.rels", &rels_xml(&[("rId4", HYPERLINK_REL, "#bookmark", false)]))],
+    );
+    let new = docx_with_parts(
+        &p("Keep."),
+        None,
+        &[("word/_rels/document.xml.rels", &rels_xml(&[("rId4", HYPERLINK_REL, "https://other.example/", true)]))],
+    );
+    let (out, _) = roundtrip_bytes(&old, &new);
+    assert!(part(&out, "word/_rels/document.xml.rels").contains(r##"Target="#bookmark""##));
+}
+
+#[test]
+fn old_namespaces_and_styles_come_along() {
+    let styles = |extra: &str| -> Vec<u8> {
+        format!(
+            r#"<?xml version="1.0"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>{extra}</w:styles>"#
+        )
+        .into_bytes()
+    };
+    let styles_rel = rels_xml(&[("rId1", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles", "styles.xml", false)]);
+    let quote = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Quote"><w:basedOn w:val="Base"/></w:style><w:style w:type="paragraph" w:styleId="Base"><w:name w:val="Base"/></w:style>"#;
+    // The old paragraph uses a w15 attribute and a style the new document lacks.
+    let old_body = r#"<w:p xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"><w:pPr><w:pStyle w:val="Quote"/></w:pPr><w:r><w:t>Quoted old text here.</w:t></w:r></w:p>"#;
+    let old_doc = [
+        br#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"><w:body>"#.as_slice(),
+        old_body.replace(r#" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml""#, "").replace("<w:r>", r#"<w:r w15:x="1">"#).as_bytes(),
+        b"</w:body></w:document>",
+    ]
+    .concat();
+    let old = zip_parts(&[
+        ("word/document.xml", old_doc),
+        ("word/_rels/document.xml.rels", styles_rel.clone()),
+        ("word/styles.xml", styles(quote)),
+    ]);
+    let new = zip_parts(&[
+        ("word/document.xml", document_xml(&p("Completely different replacement sentence goes here.")).into_bytes()),
+        ("word/_rels/document.xml.rels", styles_rel),
+        ("word/styles.xml", styles("")),
+    ]);
+    let (out, xml) = roundtrip_bytes(&old, &new);
+    assert!(xml.contains(r#"xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml""#), "{xml}");
+    let st = part(&out, "word/styles.xml");
+    assert!(st.contains(r#"w:styleId="Quote""#) && st.contains(r#"w:styleId="Base""#), "{st}");
+    assert_eq!(st.matches(r#"w:default="1""#).count(), 1, "{st}");
+}
+
 const PNG_OLD: &[u8] = b"\x89PNG old image bytes";
 const PNG_NEW: &[u8] = b"\x89PNG new image bytes";
 
