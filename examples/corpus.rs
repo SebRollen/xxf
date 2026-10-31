@@ -15,8 +15,6 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use quick_xml::Reader;
-use quick_xml::events::Event;
 use xxf::compare::{Stats, diff_blocks, stats};
 use xxf::docx::{Source, load_bytes_with};
 use xxf::model::Block;
@@ -150,14 +148,7 @@ fn check(a: &Path, b: &Path) -> Result<String, String> {
     let t3 = Instant::now();
 
     let xml = part(&out, &new.main)?;
-    let mut r = Reader::from_str(&xml);
-    loop {
-        match r.read_event() {
-            Ok(Event::Eof) => break,
-            Ok(_) => {}
-            Err(e) => return Err(format!("malformed: at {}: {e}", r.buffer_position())),
-        }
-    }
+    xxf::redline::check_xml(&xml).map_err(|e| format!("malformed: {e}"))?;
 
     let accepted = load_bytes_with(out.clone(), Revisions::Accept).map_err(|e| format!("parse accepted: {e}"))?;
     let again = diff_blocks(&new.doc.blocks, &accepted.doc.blocks);

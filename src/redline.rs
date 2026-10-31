@@ -63,23 +63,24 @@ fn with_namespaces(prolog: &str, old_xml: &str) -> String {
         Some((start, start + x[start..].find('>')?))
     };
     let (Some((ns, ne)), Some((os, oe))) = (root(prolog), root(old_xml)) else { return prolog.to_string() };
+    // Declarations on a root start tag, read with the XML parser so any
+    // whitespace or quoting is handled.
     let declared = |tag: &str| -> Vec<(String, String)> {
-        let mut v = Vec::new();
-        let mut rest = tag;
-        while let Some(i) = rest.find(" xmlns:") {
-            let after = &rest[i + 7..];
-            let (Some(eq), Some(q)) = (after.find("=\""), after.find('"')) else { break };
-            let vs = q + 1;
-            let Some(ve) = after[vs..].find('"') else { break };
-            if eq + 1 == q {
-                v.push((after[..eq].to_string(), after[vs..vs + ve].to_string()));
-            }
-            rest = &after[vs + ve..];
+        let mut r = Reader::from_str(tag);
+        match r.read_event() {
+            Ok(Event::Start(e) | Event::Empty(e)) => e
+                .attributes()
+                .filter_map(|a| a.ok())
+                .filter_map(|a| {
+                    let prefix = a.key.as_ref().strip_prefix(b"xmlns:")?;
+                    Some((String::from_utf8_lossy(prefix).into_owned(), String::from_utf8_lossy(&a.value).into_owned()))
+                })
+                .collect(),
+            _ => Vec::new(),
         }
-        v
     };
-    let have: Vec<String> = declared(&prolog[ns..ne]).into_iter().map(|d| d.0).collect();
-    let missing: String = declared(&old_xml[os..oe])
+    let have: Vec<String> = declared(&prolog[ns..=ne]).into_iter().map(|d| d.0).collect();
+    let missing: String = declared(&old_xml[os..=oe])
         .into_iter()
         .filter(|(p, _)| !have.contains(p))
         .map(|(p, uri)| format!(r#" xmlns:{p}="{uri}""#))
@@ -90,6 +91,33 @@ fn with_namespaces(prolog: &str, old_xml: &str) -> String {
     // Insert before the end of the root start tag (before any "/" of "/>").
     let at = if prolog[..ne].ends_with('/') { ne - 1 } else { ne };
     format!("{}{missing}{}", &prolog[..at], &prolog[at..])
+}
+
+/// Check that `xml` is well-formed and namespace-correct: properly nested,
+/// no duplicate attributes, every element and attribute prefix declared.
+/// (The redline tests and corpus harness run every output through this.)
+pub fn check_xml(xml: &str) -> Result<()> {
+    use quick_xml::name::ResolveResult;
+    let mut r = quick_xml::NsReader::from_str(xml);
+    loop {
+        let at = r.buffer_position();
+        let (ns, ev) = r.read_resolved_event().map_err(|e| format!("at byte {at}: {e}"))?;
+        match ev {
+            Event::Start(e) | Event::Empty(e) => {
+                if let ResolveResult::Unknown(p) = ns {
+                    return Err(format!("at byte {at}: undeclared prefix {}", String::from_utf8_lossy(&p)).into());
+                }
+                for a in e.attributes() {
+                    let a = a.map_err(|e| format!("at byte {at}: {e}"))?;
+                    if let (ResolveResult::Unknown(p), _) = r.resolve_attribute(a.key) {
+                        return Err(format!("at byte {at}: undeclared prefix {}", String::from_utf8_lossy(&p)).into());
+                    }
+                }
+            }
+            Event::Eof => return Ok(()),
+            _ => {}
+        }
+    }
 }
 
 /// Current UTC time as ISO 8601.

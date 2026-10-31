@@ -7,8 +7,6 @@ mod common;
 use std::io::{Cursor, Read};
 
 use common::{docx, docx_with_parts, document_xml, p, table, zip_parts};
-use quick_xml::Reader;
-use quick_xml::events::Event;
 use xxf::compare::{Stats, diff_blocks, stats};
 use xxf::docx::{Source, load_bytes, load_bytes_with};
 use xxf::model::Block;
@@ -51,13 +49,8 @@ fn part(bytes: &[u8], name: &str) -> String {
 }
 
 fn assert_well_formed(xml: &str) {
-    let mut r = Reader::from_str(xml);
-    loop {
-        match r.read_event() {
-            Ok(Event::Eof) => break,
-            Ok(_) => {}
-            Err(e) => panic!("malformed at {}: {e}\n{xml}", r.buffer_position()),
-        }
+    if let Err(e) = xxf::redline::check_xml(xml) {
+        panic!("malformed: {e}\n{xml}");
     }
 }
 
@@ -356,6 +349,18 @@ fn old_namespaces_and_styles_come_along() {
     let st = part(&out, "word/styles.xml");
     assert!(st.contains(r#"w:styleId="Quote""#) && st.contains(r#"w:styleId="Base""#), "{st}");
     assert_eq!(st.matches(r#"w:default="1""#).count(), 1, "{st}");
+}
+
+#[test]
+fn namespaces_declared_on_separate_lines_are_not_duplicated() {
+    let doc = |ns: &str, body: &str| -> Vec<u8> {
+        format!(r#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"{ns}><w:body>{body}</w:body></w:document>"#).into_bytes()
+    };
+    let m = "\nxmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"";
+    let old = zip_parts(&[("word/document.xml", doc(m, &p("Old paragraph text here.")))]);
+    let new = zip_parts(&[("word/document.xml", doc(m, &p("New paragraph text entirely different.")))]);
+    let (_, xml) = roundtrip_bytes(&old, &new);
+    assert_eq!(xml.matches("xmlns:m=").count(), 1, "{xml}");
 }
 
 const PNG_OLD: &[u8] = b"\x89PNG old image bytes";
