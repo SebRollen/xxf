@@ -7,6 +7,8 @@
 //!   formatting is tracked per character range;
 //! - revision IDs (`w:rsid*`), proofing marks, bookmarks, comment anchors and
 //!   other bookkeeping are ignored;
+//! - run and paragraph formatting is resolved through styles to effective
+//!   properties (see `styles`);
 //! - relationship IDs (`r:embed`, `r:id`, ...) are replaced by a hash of what
 //!   they point to, since the IDs differ between files.
 //!
@@ -22,6 +24,7 @@ use rustc_hash::FxHashMap;
 use crate::Result;
 use crate::hash::{H, hash_bytes};
 use crate::model::*;
+use crate::styles::{Resolver, Styles};
 
 /// Relationship ID → hash of the target's content (or URL for external targets).
 pub type Rels = FxHashMap<String, u64>;
@@ -96,8 +99,8 @@ const REL_ATTRS: &[&[u8]] = &[b"r:id", b"r:embed", b"r:link", b"r:pict", b"r:dm"
 /// Marks field instruction text so it never matches body text.
 const FIELD_CODE: u64 = 0x5eed_f1e1_d00c_0de5;
 
-pub fn parse_document(xml: &str, rels: &Rels) -> Result<Document> {
-    let mut p = Parser { r: Reader::from_str(xml), rels };
+pub fn parse_document(xml: &str, rels: &Rels, styles: &Styles) -> Result<Document> {
+    let mut p = Parser { r: Reader::from_str(xml), xml, rels, res: Resolver::new(styles) };
     loop {
         match p.r.read_event()? {
             Event::Start(e) if e.name().as_ref() == b"w:body" => {
@@ -113,7 +116,9 @@ pub fn parse_document(xml: &str, rels: &Rels) -> Result<Document> {
 
 struct Parser<'a> {
     r: Reader<&'a [u8]>,
+    xml: &'a str,
     rels: &'a Rels,
+    res: Resolver<'a>,
 }
 
 fn is(name: &[u8], set: &[&[u8]]) -> bool {
@@ -125,6 +130,12 @@ fn eof(ctx: &str) -> crate::Error {
 }
 
 impl<'a> Parser<'a> {
+    /// Skip to the end of the element just opened, returning its raw inner XML.
+    fn inner(&mut self, e: &BytesStart) -> Result<&'a str> {
+        let span = self.r.read_to_end(e.name())?;
+        Ok(&self.xml[span.start as usize..span.end as usize])
+    }
+
     /// Block-level content until `</end>`. `props` receives a `w:tcPr` hash.
     fn blocks(&mut self, end: &[u8], props: &mut u64) -> Result<Vec<Block>> {
         let mut out = Vec::new();
@@ -146,7 +157,8 @@ impl<'a> Parser<'a> {
                     }
                 },
                 Event::Empty(e) if e.name().as_ref() == b"w:p" => {
-                    out.push(Block::Para(Para::new(String::new(), Vec::new(), 0)))
+                    let (ppr, style) = self.res.ppr("")?;
+                    out.push(Block::Para(Para::new(String::new(), Vec::new(), ppr, style)))
                 }
                 Event::End(e) if e.name().as_ref() == end => return Ok(out),
                 Event::Eof => return Err(eof("block content")),
@@ -201,10 +213,14 @@ impl<'a> Parser<'a> {
 
     fn para(&mut self) -> Result<Para> {
         let mut b = ParaBuilder::default();
+        (b.ppr, b.style) = self.res.ppr("")?;
         loop {
             match self.r.read_event()? {
                 Event::Start(e) => match e.name().as_ref() {
-                    b"w:pPr" => b.ppr = self.hash_elem(&e, false, true)?,
+                    b"w:pPr" => {
+                        let raw = self.inner(&e)?;
+                        (b.ppr, b.style) = self.res.ppr(raw)?;
+                    }
                     b"w:r" => self.run(&mut b)?,
                     n if is(n, TRANSPARENT) => {}
                     n if is(n, SKIPPED) || is(n, IGNORED) => {
@@ -224,11 +240,14 @@ impl<'a> Parser<'a> {
     }
 
     fn run(&mut self, b: &mut ParaBuilder) -> Result<()> {
-        let mut fmt = 0;
+        let mut fmt = self.res.rpr(b.style.as_deref(), "")?;
         loop {
             match self.r.read_event()? {
                 Event::Start(e) => match e.name().as_ref() {
-                    b"w:rPr" => fmt = self.hash_elem(&e, false, true)?,
+                    b"w:rPr" => {
+                        let raw = self.inner(&e)?;
+                        fmt = self.res.rpr(b.style.as_deref(), raw)?;
+                    }
                     b"w:t" => {
                         let s = self.text(b"w:t")?;
                         b.text(&s, fmt);
@@ -247,7 +266,6 @@ impl<'a> Parser<'a> {
                     }
                 },
                 Event::Empty(e) => match e.name().as_ref() {
-                    b"w:rPr" => fmt = 0,
                     b"w:tab" | b"w:ptab" => b.text("\t", fmt),
                     b"w:br" | b"w:cr" if e.attributes().next().is_none() => b.text("\n", fmt),
                     // Page/column breaks, symbols.
@@ -384,6 +402,7 @@ struct ParaBuilder {
     /// Content hash of each OBJ placeholder, in order.
     objects: Vec<u64>,
     ppr: u64,
+    style: Option<String>,
 }
 
 impl ParaBuilder {
@@ -436,7 +455,7 @@ impl ParaBuilder {
             tokens.push(Token { start: s as u32, end: e as u32, kind, text_hash, fmt: 0 });
         }
         assign_fmt(&mut tokens, &self.runs);
-        Para::new(text, tokens, self.ppr)
+        Para::new(text, tokens, self.ppr, self.style)
     }
 }
 

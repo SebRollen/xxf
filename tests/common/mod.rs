@@ -7,6 +7,11 @@ const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/
 
 /// Build a minimal .docx whose body is `body` (raw WordprocessingML).
 pub fn docx(body: &str) -> Vec<u8> {
+    docx_with_styles(body, None)
+}
+
+/// As `docx`, with `styles` as the contents of `w:styles` in `word/styles.xml`.
+pub fn docx_with_styles(body: &str, styles: Option<&str>) -> Vec<u8> {
     let mut z = ZipWriter::new(Cursor::new(Vec::new()));
     let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     let files = [
@@ -19,7 +24,8 @@ pub fn docx(body: &str) -> Vec<u8> {
             format!(r#"<?xml version="1.0" encoding="UTF-8"?><w:document {NS}><w:body>{body}</w:body></w:document>"#),
         ),
     ];
-    for (name, content) in files {
+    let styles = styles.map(|st| ("word/styles.xml", format!(r#"<?xml version="1.0" encoding="UTF-8"?><w:styles {NS}>{st}</w:styles>"#)));
+    for (name, content) in files.into_iter().chain(styles) {
         z.start_file(name, opts).unwrap();
         z.write_all(content.as_bytes()).unwrap();
     }

@@ -41,6 +41,9 @@ pub enum Step {
 
 /// Minimum Dice similarity for two units to be considered the same, edited.
 const SIMILARITY: f64 = 0.5;
+/// Fraction of the shorter unit's words that must appear in the longer one
+/// for containment to count as similarity.
+const CONTAINMENT: f64 = 0.8;
 /// Hunks larger than this many old×new pairs skip similarity pairing.
 const MAX_PAIR_CELLS: usize = 1 << 16;
 /// Units with fewer words than this are too generic to call moves.
@@ -86,14 +89,17 @@ fn pair_hunk<T: Unit>(old: &[T], new: &[T], or: Range<usize>, nr: Range<usize>, 
     }
 }
 
-/// Dice coefficient of two sorted token multisets.
+/// Dice coefficient of two sorted token multisets, raised to the pairing
+/// threshold when the shorter unit is mostly contained in the longer one (a
+/// sentence that gained a long clause is still the same sentence).
 pub fn similarity<T: Unit>(a: &T, b: &T) -> f64 {
     if a.kind() != b.kind() {
         return 0.0;
     }
     let (x, y) = (a.bag(), b.bag());
     let total = (x.len() + y.len()) as f64;
-    if x.is_empty() || y.is_empty() || 2.0 * x.len().min(y.len()) as f64 / total < SIMILARITY {
+    let short = x.len().min(y.len());
+    if short == 0 || (short < MIN_MOVE_WORDS && 2.0 * short as f64 / total < SIMILARITY) {
         return 0.0;
     }
     let (mut i, mut j, mut common) = (0, 0, 0);
@@ -108,7 +114,12 @@ pub fn similarity<T: Unit>(a: &T, b: &T) -> f64 {
             }
         }
     }
-    2.0 * common as f64 / total
+    let dice = 2.0 * common as f64 / total;
+    if short >= MIN_MOVE_WORDS && common as f64 >= CONTAINMENT * short as f64 {
+        dice.max(SIMILARITY)
+    } else {
+        dice
+    }
 }
 
 fn pair_similar<T: Unit>(old: &[T], new: &[T], or: Range<usize>, nr: Range<usize>, steps: &mut Vec<Step>) {

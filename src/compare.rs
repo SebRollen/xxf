@@ -113,29 +113,37 @@ pub fn diff_para(a: &Para, b: &Para) -> ParaDiff {
             Hunk::Change { a: old, b: new } => spans.push(Span { kind: SpanKind::Replace, old, new }),
         }
     }
-    ParaDiff { ppr_changed: a.ppr != b.ppr, spans: absorb_spaces(spans, a) }
+    ParaDiff { ppr_changed: a.ppr != b.ppr, spans: cleanup(spans, a, b) }
 }
 
-/// Merge `[-a-]{+b+} [-c-]{+d+}` into `[-a c-]{+b d+}` when only whitespace
-/// separates two replacements; word diffs read much better that way.
-fn absorb_spaces(spans: Vec<Span>, a: &Para) -> Vec<Span> {
-    let mut out: Vec<Span> = Vec::with_capacity(spans.len());
-    let mut it = spans.into_iter().peekable();
-    while let Some(s) = it.next() {
-        let between_replaces = s.kind == SpanKind::Same
-            && out.last().is_some_and(|l| l.kind == SpanKind::Replace)
-            && it.peek().is_some_and(|n| n.kind == SpanKind::Replace)
-            && a.tokens[s.old.clone()].iter().all(|t| t.kind == TokenKind::Space);
-        if between_replaces {
-            let next = it.next().unwrap();
-            let last = out.last_mut().unwrap();
-            last.old.end = next.old.end;
-            last.new.end = next.new.end;
+/// Semantic cleanup, after diff-match-patch's `cleanupSemantic`: an unchanged
+/// stretch between two replacements is folded into them when it is no longer
+/// than the edits on either side, or is only whitespace. This turns
+/// `[-and-]{+signed+} [-the-]{+a+}` chaff in rewritten sentences into one
+/// readable replacement, while keeping substantial shared text visible.
+fn cleanup(mut spans: Vec<Span>, a: &Para, b: &Para) -> Vec<Span> {
+    let chars = |p: &Para, r: &Range<usize>| p.slice(r.clone()).chars().count();
+    let edit_len = |s: &Span| chars(a, &s.old).max(chars(b, &s.new));
+    let mut i = 1;
+    while i + 1 < spans.len() {
+        let (prev, eq, next) = (&spans[i - 1], &spans[i], &spans[i + 1]);
+        let fold = eq.kind != SpanKind::Replace
+            && prev.kind == SpanKind::Replace
+            && next.kind == SpanKind::Replace
+            && (a.tokens[eq.old.clone()].iter().all(|t| t.kind == TokenKind::Space)
+                || chars(a, &eq.old) <= edit_len(prev).min(edit_len(next)));
+        if fold {
+            let (old_end, new_end) = (next.old.end, next.new.end);
+            spans.drain(i..i + 2);
+            spans[i - 1].old.end = old_end;
+            spans[i - 1].new.end = new_end;
+            // The grown replacement may now swallow the equality before it.
+            i = if i >= 3 { i - 2 } else { 1 };
         } else {
-            out.push(s);
+            i += 1;
         }
     }
-    out
+    spans
 }
 
 pub fn diff_table(a: &Table, b: &Table) -> TableDiff {
@@ -178,18 +186,26 @@ pub struct Stats {
     pub inserted: usize,
     pub deleted: usize,
     pub moved: usize,
+    /// Empty paragraphs inserted or deleted (layout spacing, usually).
+    pub blank: usize,
 }
 
-pub fn stats(items: &[BlockItem]) -> Stats {
+pub fn stats(old: &[Block], new: &[Block], items: &[BlockItem]) -> Stats {
     let mut s = Stats::default();
     for it in items {
         match it.step {
             Step::Equal(..) | Step::MovedOut(..) => {}
             Step::Changed(..) => s.changed += 1,
+            Step::Inserted(j) if is_blank(&new[j]) => s.blank += 1,
+            Step::Deleted(i) if is_blank(&old[i]) => s.blank += 1,
             Step::Inserted(_) => s.inserted += 1,
             Step::Deleted(_) => s.deleted += 1,
             Step::MovedIn(..) => s.moved += 1,
         }
     }
     s
+}
+
+pub fn is_blank(b: &Block) -> bool {
+    matches!(b, Block::Para(p) if p.tokens.is_empty())
 }

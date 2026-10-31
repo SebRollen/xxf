@@ -57,7 +57,7 @@ fn large_document() {
     std::io::Read::read_to_string(&mut zip.by_name("word/document.xml").unwrap(), &mut xml).unwrap();
     let unzip = t.elapsed();
     let t = Instant::now();
-    xxf::parse::parse_document(&xml, &Default::default()).unwrap();
+    xxf::parse::parse_document(&xml, &Default::default(), &Default::default()).unwrap();
     println!(
         "one doc: {:.1} MB xml, unzip {:.1} ms, parse {:.1} ms",
         xml.len() as f64 / 1e6,
@@ -77,6 +77,6 @@ fn large_document() {
         a_bytes.len() as f64 / 1e6,
         (t1 - t0).as_secs_f64() * 1e3,
         (t2 - t1).as_secs_f64() * 1e3,
-        stats(&items)
+        stats(&a.blocks, &b.blocks, &items)
     );
 }

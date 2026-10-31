@@ -43,7 +43,7 @@ pub struct Token {
     pub end: u32,
     pub kind: TokenKind,
     pub text_hash: u64,
-    /// Hash of the run properties covering this token (0 = none).
+    /// Hash of the effective run properties covering this token (0 = all defaults).
     pub fmt: u64,
 }
 
@@ -51,8 +51,10 @@ pub struct Token {
 pub struct Para {
     pub text: String,
     pub tokens: Vec<Token>,
-    /// Hash of normalized `w:pPr` (0 = none).
+    /// Hash of effective paragraph properties (0 = all defaults).
     pub ppr: u64,
+    /// Paragraph style ID, for reporting only; comparison uses `ppr`.
+    pub style: Option<String>,
     pub text_hash: u64,
     /// Text + formatting + paragraph properties.
     pub hash: u64,
@@ -95,7 +97,7 @@ pub struct Opaque {
 }
 
 impl Para {
-    pub fn new(text: String, tokens: Vec<Token>, ppr: u64) -> Self {
+    pub fn new(text: String, tokens: Vec<Token>, ppr: u64, style: Option<String>) -> Self {
         let mut th = H::new();
         th.u64(KIND_PARA);
         let mut h = H::new();
@@ -112,7 +114,7 @@ impl Para {
             .map(|t| t.text_hash)
             .collect();
         bag.sort_unstable();
-        Self { text, tokens, ppr, text_hash, hash: h.finish(), bag }
+        Self { text, tokens, ppr, style, text_hash, hash: h.finish(), bag }
     }
 
     /// Text covered by a range of tokens.

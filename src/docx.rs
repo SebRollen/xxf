@@ -12,9 +12,13 @@ use crate::Result;
 use crate::hash::hash_bytes;
 use crate::model::Document;
 use crate::parse::{Rels, parse_document};
+use crate::styles::Styles;
 
 const MAIN_PART: &str = "word/document.xml";
 const MAIN_RELS: &str = "word/_rels/document.xml.rels";
+const STYLES: &str = "word/styles.xml";
+const THEME: &str = "word/theme/theme1.xml";
+const NUMBERING: &str = "word/numbering.xml";
 
 pub fn load(path: &Path) -> Result<Document> {
     load_from(BufReader::new(File::open(path)?))
@@ -31,7 +35,15 @@ fn load_from<R: Read + Seek>(r: R) -> Result<Document> {
         Ok(s) => parse_rels(&s, &mut zip)?,
         Err(_) => Rels::default(),
     };
-    parse_document(&xml, &rels)
+    let styles = match read_string(&mut zip, STYLES) {
+        Ok(s) => {
+            let theme = read_string(&mut zip, THEME).ok();
+            let numbering = read_string(&mut zip, NUMBERING).ok();
+            Styles::parse(&s, theme.as_deref(), numbering.as_deref())?
+        }
+        Err(_) => Styles::default(),
+    };
+    parse_document(&xml, &rels, &styles)
 }
 
 fn read_string<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> Result<String> {

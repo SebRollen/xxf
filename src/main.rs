@@ -54,7 +54,7 @@ fn main() -> ExitCode {
             new.blocks.len()
         );
     }
-    let s = xxf::compare::stats(&items);
+    let s = xxf::compare::stats(&old.blocks, &new.blocks, &items);
     if s == Default::default() { ExitCode::SUCCESS } else { ExitCode::from(1) }
 }
 
