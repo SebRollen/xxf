@@ -1,6 +1,9 @@
 //! Myers' O(ND) sequence diff, linear-space divide-and-conquer variant.
 
+use std::hash::Hash;
 use std::ops::{Index, IndexMut, Range};
+
+use rustc_hash::FxHashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Hunk {
@@ -10,13 +13,70 @@ pub enum Hunk {
     Change { a: Range<usize>, b: Range<usize> },
 }
 
+/// Inputs at least this long are first split at anchors.
+const ANCHOR_MIN_LEN: usize = 4096;
+
 /// Diff two sequences into alternating equal / change hunks.
-pub fn diff<T: Eq>(a: &[T], b: &[T]) -> Vec<Hunk> {
+///
+/// Long inputs are first anchored on elements that occur exactly once in each
+/// (patience diff): the longest increasing run of such matches splits the
+/// problem into small independent gaps, each diffed with Myers. Short inputs
+/// get a plain, minimal Myers diff.
+pub fn diff<T: Eq + Hash>(a: &[T], b: &[T]) -> Vec<Hunk> {
     let max = max_d(a.len(), b.len());
     let mut vf = V::new(max);
     let mut vb = V::new(max);
     let mut out = Vec::new();
-    conquer(a, 0..a.len(), b, 0..b.len(), &mut vf, &mut vb, &mut out);
+    let (mut pa, mut pb) = (0, 0);
+    if a.len() + b.len() >= ANCHOR_MIN_LEN {
+        for (ia, ib) in anchors(a, b) {
+            conquer(a, pa..ia, b, pb..ib, &mut vf, &mut vb, &mut out);
+            push_equal(&mut out, ia, ib, 1);
+            (pa, pb) = (ia + 1, ib + 1);
+        }
+    }
+    conquer(a, pa..a.len(), b, pb..b.len(), &mut vf, &mut vb, &mut out);
+    out
+}
+
+/// Matches of elements unique in both sequences, longest increasing subset.
+fn anchors<T: Eq + Hash>(a: &[T], b: &[T]) -> Vec<(usize, usize)> {
+    // Per element: (count in a, count in b, index in a, index in b).
+    let mut seen: FxHashMap<&T, (u32, u32, usize, usize)> = FxHashMap::default();
+    for (i, x) in a.iter().enumerate() {
+        let e = seen.entry(x).or_insert((0, 0, i, 0));
+        e.0 += 1;
+    }
+    for (j, x) in b.iter().enumerate() {
+        if let Some(e) = seen.get_mut(x) {
+            e.1 += 1;
+            e.3 = j;
+        }
+    }
+    let mut pairs: Vec<(usize, usize)> =
+        seen.into_values().filter(|e| e.0 == 1 && e.1 == 1).map(|e| (e.2, e.3)).collect();
+    pairs.sort_unstable();
+    // Longest increasing subsequence of the b indices (patience sorting).
+    let mut tails: Vec<usize> = Vec::new(); // index into pairs ending a run of each length
+    let mut prev: Vec<usize> = vec![usize::MAX; pairs.len()];
+    for (i, &(_, j)) in pairs.iter().enumerate() {
+        let len = tails.partition_point(|&t| pairs[t].1 < j);
+        if len > 0 {
+            prev[i] = tails[len - 1];
+        }
+        if len == tails.len() {
+            tails.push(i);
+        } else {
+            tails[len] = i;
+        }
+    }
+    let mut out = Vec::with_capacity(tails.len());
+    let mut cur = tails.last().copied().unwrap_or(usize::MAX);
+    while cur != usize::MAX {
+        out.push(pairs[cur]);
+        cur = prev[cur];
+    }
+    out.reverse();
     out
 }
 
@@ -99,6 +159,9 @@ fn middle_snake<T: Eq>(
     vf[1] = 0;
     vb[1] = 0;
     for d in 0..max_d(n, m) as isize {
+        if d >= MIN_COST_CAP && d as usize * (n + m) > COST_BUDGET {
+            return None;
+        }
         for k in (-d..=d).rev().step_by(2) {
             let mut x = if k == -d || (k != d && vf[k - 1] < vf[k + 1]) {
                 vf[k + 1]
@@ -135,6 +198,13 @@ fn middle_snake<T: Eq>(
     }
     None
 }
+
+/// Past this much work (edit distance × range length) the search gives up
+/// and reports the whole range as one change. With anchoring (below) such
+/// ranges are the stretches between anchors, so this only bites on genuinely
+/// unrelated content, which then costs near-linear time instead of quadratic.
+const COST_BUDGET: usize = 50_000_000;
+const MIN_COST_CAP: isize = 256;
 
 fn conquer<T: Eq>(
     a: &[T],
@@ -185,8 +255,12 @@ mod tests {
 
     /// Checks the hunks tile both sequences exactly and equal hunks really are equal.
     fn check(a: &[u8], b: &[u8]) -> usize {
+        check_hunks(a, b, &diff(a, b))
+    }
+
+    fn check_hunks<T: Eq + std::fmt::Debug>(a: &[T], b: &[T], hunks: &[Hunk]) -> usize {
         let (mut i, mut j, mut same) = (0, 0, 0);
-        for h in diff(a, b) {
+        for h in hunks.iter().cloned() {
             match h {
                 Hunk::Equal { a: x, b: y, len } => {
                     assert_eq!((x, y), (i, j));
@@ -212,6 +286,24 @@ mod tests {
         assert_eq!(check(b"", b"abc"), 0);
         assert_eq!(check(b"abc", b""), 0);
         assert_eq!(check(b"abc", b"abc"), 3);
+    }
+
+    #[test]
+    fn long_inputs_use_anchors_and_stay_valid() {
+        // Unrelated halves around a shared unique middle: anchored, and the
+        // unrelated parts exceed the cost budget and become single changes.
+        let mut a: Vec<u32> = (0..20_000).collect();
+        let mut b: Vec<u32> = (100_000..120_000).collect();
+        a.extend(500_000..500_100);
+        b.extend(500_000..500_100);
+        a.extend(200_000..220_000);
+        b.extend(300_000..320_000);
+        let t = std::time::Instant::now();
+        let hunks = diff(&a, &b);
+        assert!(t.elapsed().as_secs() < 5, "too slow: {:?}", t.elapsed());
+        let same: usize = hunks.iter().map(|h| if let Hunk::Equal { len, .. } = h { *len } else { 0 }).sum();
+        assert_eq!(same, 100);
+        check_hunks(&a, &b, &hunks);
     }
 
     #[test]

@@ -95,10 +95,12 @@ fn moved_paragraph() {
 
 #[test]
 fn moved_and_reformatted_paragraph_has_detail() {
+    // Two paragraphs stay in order, so the third is the one that moved.
     let a = p("Anchor paragraph number one.");
+    let c = p("Anchor paragraph number two.");
     let m = p("Moving words go here.");
     let m2 = r#"<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>Moving words go here.</w:t></w:r></w:p>"#;
-    let (_, _, items) = compare(&[m, a.clone()].concat(), &[a, m2.to_string()].concat());
+    let (_, _, items) = compare(&[m, a.clone(), c.clone()].concat(), &[a, c, m2.to_string()].concat());
     let moved = items.iter().find(|i| matches!(i.step, Step::MovedIn(..))).unwrap();
     assert!(matches!(moved.detail, Some(Detail::Para(_))));
 }
@@ -229,5 +231,16 @@ fn renumbered_hidden_bookmarks_in_field_codes_are_not_changes() {
         )
     };
     let (a, b, items) = compare(&toc("_Toc234799436"), &toc("_Toc181818181"));
+    assert_eq!(stats(&a.blocks, &b.blocks, &items), Stats::default());
+}
+
+#[test]
+fn first_line_indent_replaces_inherited_hanging_indent() {
+    let styles = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"/><w:style w:type="paragraph" w:styleId="Hang"><w:pPr><w:ind w:left="568" w:hanging="284"/></w:pPr></w:style>"#;
+    let old = r#"<w:p><w:pPr><w:pStyle w:val="Hang"/><w:ind w:left="284" w:firstLine="284"/></w:pPr><w:r><w:t>Indented list text.</w:t></w:r></w:p>"#;
+    let new = r#"<w:p><w:pPr><w:ind w:left="284" w:firstLine="284"/></w:pPr><w:r><w:t>Indented list text.</w:t></w:r></w:p>"#;
+    let a = load_bytes(&docx_with_styles(old, Some(styles))).unwrap().doc;
+    let b = load_bytes(&docx_with_styles(new, Some(styles))).unwrap().doc;
+    let items = diff_blocks(&a.blocks, &b.blocks);
     assert_eq!(stats(&a.blocks, &b.blocks, &items), Stats::default());
 }

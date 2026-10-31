@@ -314,7 +314,14 @@ fn is_on(v: &str) -> bool {
 /// font for the same script, and vice versa.
 fn merge(base: &mut Props, top: &Props) {
     for (k, v) in top {
-        for (a, b) in [("@w:ascii", "@w:asciiTheme"), ("@w:hAnsi", "@w:hAnsiTheme")] {
+        // Pairs that exclude each other: setting one clears the inherited
+        // other (fonts vs. theme fonts; first-line indent vs. hanging indent).
+        for (a, b) in [
+            ("@w:ascii", "@w:asciiTheme"),
+            ("@w:hAnsi", "@w:hAnsiTheme"),
+            ("@w:firstLine", "@w:hanging"),
+            ("@w:firstLineChars", "@w:hangingChars"),
+        ] {
             if let Some(stem) = k.strip_suffix(a) {
                 base.remove(&format!("{stem}{b}"));
             } else if let Some(stem) = k.strip_suffix(b) {

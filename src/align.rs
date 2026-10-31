@@ -1,11 +1,12 @@
 //! Alignment of block-like sequences (paragraphs, table rows).
 //!
-//! 1. Myers diff on full content hashes gives exact matches.
-//! 2. Inside each changed hunk, Myers on text-only hashes pairs units whose
-//!    text is identical but formatting/properties differ.
-//! 3. Remaining units in the hunk are paired by bag-of-words similarity with an
-//!    order-preserving max-weight alignment.
-//! 4. Unpaired deletions/insertions with identical text anywhere in the
+//! 1. Myers diff on text-only hashes aligns units with identical text; those
+//!    whose formatting/properties also differ are marked changed. Aligning on
+//!    text first keeps a document-wide formatting change (a restyled
+//!    template) from turning into a worst-case diff.
+//! 2. Units in each changed hunk are paired by bag-of-words similarity with
+//!    an order-preserving max-weight alignment.
+//! 3. Unpaired deletions/insertions with identical text anywhere in the
 //!    document become moves.
 
 use std::collections::VecDeque;
@@ -50,43 +51,25 @@ const MAX_PAIR_CELLS: usize = 1 << 16;
 const MIN_MOVE_WORDS: usize = 3;
 
 pub fn align<T: Unit>(old: &[T], new: &[T], moves: bool) -> Vec<Step> {
-    let ha: Vec<u64> = old.iter().map(Unit::hash).collect();
-    let hb: Vec<u64> = new.iter().map(Unit::hash).collect();
+    let ta: Vec<u64> = old.iter().map(Unit::text_hash).collect();
+    let tb: Vec<u64> = new.iter().map(Unit::text_hash).collect();
     let mut steps = Vec::with_capacity(old.len().max(new.len()));
-    for h in diff::diff(&ha, &hb) {
+    for h in diff::diff(&ta, &tb) {
         match h {
-            Hunk::Equal { a, b, len } => steps.extend((0..len).map(|k| Step::Equal(a + k, b + k))),
-            Hunk::Change { a, b } => pair_hunk(old, new, a, b, &mut steps),
+            Hunk::Equal { a, b, len } => steps.extend((0..len).map(|k| {
+                if old[a + k].hash() == new[b + k].hash() {
+                    Step::Equal(a + k, b + k)
+                } else {
+                    Step::Changed(a + k, b + k)
+                }
+            })),
+            Hunk::Change { a, b } => pair_similar(old, new, a, b, &mut steps),
         }
     }
     if moves {
         find_moves(old, new, &mut steps);
     }
     steps
-}
-
-fn pair_hunk<T: Unit>(old: &[T], new: &[T], or: Range<usize>, nr: Range<usize>, steps: &mut Vec<Step>) {
-    if or.is_empty() || nr.is_empty() {
-        steps.extend(or.map(Step::Deleted));
-        steps.extend(nr.map(Step::Inserted));
-        return;
-    }
-    let ta: Vec<u64> = old[or.clone()].iter().map(Unit::text_hash).collect();
-    let tb: Vec<u64> = new[nr.clone()].iter().map(Unit::text_hash).collect();
-    for h in diff::diff(&ta, &tb) {
-        match h {
-            Hunk::Equal { a, b, len } => {
-                steps.extend((0..len).map(|k| Step::Changed(or.start + a + k, nr.start + b + k)))
-            }
-            Hunk::Change { a, b } => pair_similar(
-                old,
-                new,
-                or.start + a.start..or.start + a.end,
-                nr.start + b.start..nr.start + b.end,
-                steps,
-            ),
-        }
-    }
 }
 
 /// Dice coefficient of two sorted token multisets, raised to the pairing
