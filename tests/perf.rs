@@ -66,11 +66,17 @@ fn large_document() {
     );
 
     let t0 = Instant::now();
-    let a = load_bytes(&a_bytes).unwrap();
-    let b = load_bytes(&b_bytes).unwrap();
+    let a = load_bytes(&a_bytes).unwrap().doc;
+    let b = load_bytes(&b_bytes).unwrap().doc;
     let t1 = Instant::now();
     let items = diff_blocks(&a.blocks, &b.blocks);
     let t2 = Instant::now();
+    let old_src = load_bytes(&a_bytes).unwrap();
+    let new_src = load_bytes(&b_bytes).unwrap();
+    let t = Instant::now();
+    let opts = xxf::redline::Options { author: "perf".into(), date: "2026-01-01T00:00:00Z".into() };
+    let out = xxf::redline::write(&old_src, &new_src, &items, &opts).unwrap();
+    println!("redline {:.1} ms ({:.1} MB zipped)", t.elapsed().as_secs_f64() * 1e3, out.len() as f64 / 1e6);
     println!(
         "{} paras, {:.1} MB zipped each: load {:.1} ms (both), diff {:.1} ms; {:?}",
         n,

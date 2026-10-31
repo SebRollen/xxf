@@ -165,6 +165,11 @@ impl Styles {
         }
     }
 
+    /// `w:numId` → fingerprint of its list definition.
+    pub fn numbering(&self) -> &FxHashMap<String, String> {
+        &self.numbering
+    }
+
     /// Merge a style and its `basedOn` ancestors into `ppr`/`rpr`, root first.
     fn apply_chain(&self, id: &str, ppr: &mut Props, rpr: &mut Props) {
         let mut chain = Vec::new();

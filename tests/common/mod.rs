@@ -3,7 +3,7 @@ use std::io::{Cursor, Write};
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
-const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing""#;
 
 /// Build a minimal .docx whose body is `body` (raw WordprocessingML).
 pub fn docx(body: &str) -> Vec<u8> {
@@ -12,6 +12,12 @@ pub fn docx(body: &str) -> Vec<u8> {
 
 /// As `docx`, with `styles` as the contents of `w:styles` in `word/styles.xml`.
 pub fn docx_with_styles(body: &str, styles: Option<&str>) -> Vec<u8> {
+    docx_with_parts(body, styles, &[])
+}
+
+/// As `docx_with_styles`, plus extra package parts (name, content).
+#[allow(dead_code)] // not every test binary uses it
+pub fn docx_with_parts(body: &str, styles: Option<&str>, extra: &[(&str, &[u8])]) -> Vec<u8> {
     let mut z = ZipWriter::new(Cursor::new(Vec::new()));
     let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     let files = [
@@ -25,9 +31,10 @@ pub fn docx_with_styles(body: &str, styles: Option<&str>) -> Vec<u8> {
         ),
     ];
     let styles = styles.map(|st| ("word/styles.xml", format!(r#"<?xml version="1.0" encoding="UTF-8"?><w:styles {NS}>{st}</w:styles>"#)));
-    for (name, content) in files.into_iter().chain(styles) {
+    let extra = extra.iter().map(|(n, b)| (*n, b.to_vec()));
+    for (name, content) in files.into_iter().chain(styles).map(|(n, c)| (n, c.into_bytes())).chain(extra) {
         z.start_file(name, opts).unwrap();
-        z.write_all(content.as_bytes()).unwrap();
+        z.write_all(&content).unwrap();
     }
     z.finish().unwrap().into_inner()
 }

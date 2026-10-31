@@ -1,7 +1,6 @@
 //! Reading .docx packages.
 
-use std::fs::File;
-use std::io::{BufReader, Cursor, Read, Seek};
+use std::io::{Cursor, Read, Seek};
 use std::path::Path;
 
 use quick_xml::Reader;
@@ -11,28 +10,47 @@ use zip::ZipArchive;
 use crate::Result;
 use crate::hash::hash_bytes;
 use crate::model::Document;
-use crate::parse::{Rels, parse_document};
+use crate::parse::{Rels, Revisions, parse_document_with};
 use crate::styles::Styles;
 
-const MAIN_PART: &str = "word/document.xml";
-const MAIN_RELS: &str = "word/_rels/document.xml.rels";
+pub const MAIN_PART: &str = "word/document.xml";
+pub const MAIN_RELS: &str = "word/_rels/document.xml.rels";
+pub const CONTENT_TYPES: &str = "[Content_Types].xml";
 const STYLES: &str = "word/styles.xml";
 const THEME: &str = "word/theme/theme1.xml";
 const NUMBERING: &str = "word/numbering.xml";
 
-pub fn load(path: &Path) -> Result<Document> {
-    load_from(BufReader::new(File::open(path)?))
+/// A loaded document plus what's needed to write a redline from it: the
+/// package bytes and the raw `document.xml` that the model's offsets index.
+pub struct Source {
+    pub doc: Document,
+    pub xml: String,
+    pub styles: Styles,
+    pub zip: Vec<u8>,
 }
 
-pub fn load_bytes(bytes: &[u8]) -> Result<Document> {
-    load_from(Cursor::new(bytes))
+/// One package relationship of the main document part.
+#[derive(Debug, Clone)]
+pub struct Rel {
+    pub id: String,
+    pub typ: String,
+    pub target: String,
+    pub external: bool,
 }
 
-fn load_from<R: Read + Seek>(r: R) -> Result<Document> {
-    let mut zip = ZipArchive::new(r)?;
+pub fn load(path: &Path) -> Result<Source> {
+    load_bytes_with(std::fs::read(path)?, Revisions::Accept)
+}
+
+pub fn load_bytes(bytes: &[u8]) -> Result<Source> {
+    load_bytes_with(bytes.to_vec(), Revisions::Accept)
+}
+
+pub fn load_bytes_with(bytes: Vec<u8>, mode: Revisions) -> Result<Source> {
+    let mut zip = ZipArchive::new(Cursor::new(&bytes))?;
     let xml = read_string(&mut zip, MAIN_PART)?;
     let rels = match read_string(&mut zip, MAIN_RELS) {
-        Ok(s) => parse_rels(&s, &mut zip)?,
+        Ok(s) => hash_rels(&parse_rels(&s)?, &mut zip)?,
         Err(_) => Rels::default(),
     };
     let styles = match read_string(&mut zip, STYLES) {
@@ -43,52 +61,43 @@ fn load_from<R: Read + Seek>(r: R) -> Result<Document> {
         }
         Err(_) => Styles::default(),
     };
-    parse_document(&xml, &rels, &styles)
+    let doc = parse_document_with(&xml, &rels, &styles, mode)?;
+    drop(zip);
+    Ok(Source { doc, xml, styles, zip: bytes })
 }
 
-fn read_string<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> Result<String> {
+pub fn read_string<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> Result<String> {
     let mut f = zip.by_name(name)?;
     let mut s = String::with_capacity(f.size() as usize);
     f.read_to_string(&mut s)?;
     Ok(s)
 }
 
-/// Map relationship IDs to a hash of their target. Embedded media and charts
-/// are hashed by content, so the same image matches across documents
-/// regardless of its file name or ID; everything else by target path/URL.
-fn parse_rels<R: Read + Seek>(xml: &str, zip: &mut ZipArchive<R>) -> Result<Rels> {
-    let mut rels = Rels::default();
+pub fn read_bytes<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> Result<Vec<u8>> {
+    let mut f = zip.by_name(name)?;
+    let mut buf = Vec::with_capacity(f.size() as usize);
+    f.read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
+pub fn parse_rels(xml: &str) -> Result<Vec<Rel>> {
+    let mut rels = Vec::new();
     let mut r = Reader::from_str(xml);
     loop {
         match r.read_event()? {
             Event::Empty(e) | Event::Start(e) if e.name().as_ref() == b"Relationship" => {
-                let (mut id, mut target, mut external) = (None, None, false);
+                let mut rel = Rel { id: String::new(), typ: String::new(), target: String::new(), external: false };
                 for a in e.attributes() {
                     let a = a?;
                     match a.key.as_ref() {
-                        b"Id" => id = Some(a.unescape_value()?.into_owned()),
-                        b"Target" => target = Some(a.unescape_value()?.into_owned()),
-                        b"TargetMode" => external = a.value.as_ref() == b"External",
+                        b"Id" => rel.id = a.unescape_value()?.into_owned(),
+                        b"Type" => rel.typ = a.unescape_value()?.into_owned(),
+                        b"Target" => rel.target = a.unescape_value()?.into_owned(),
+                        b"TargetMode" => rel.external = a.value.as_ref() == b"External",
                         _ => {}
                     }
                 }
-                let (Some(id), Some(target)) = (id, target) else { continue };
-                let path = (!external).then(|| resolve(&target));
-                let hash = match path {
-                    Some(p) if ["word/media/", "word/embeddings/", "word/charts/"].iter().any(|d| p.starts_with(d)) => {
-                        let mut buf = Vec::new();
-                        match zip.by_name(&p) {
-                            Ok(mut f) => {
-                                f.read_to_end(&mut buf)?;
-                                hash_bytes(&buf)
-                            }
-                            Err(_) => hash_bytes(p.as_bytes()),
-                        }
-                    }
-                    Some(p) => hash_bytes(p.as_bytes()),
-                    None => hash_bytes(target.as_bytes()),
-                };
-                rels.insert(id, hash);
+                rels.push(rel);
             }
             Event::Eof => return Ok(rels),
             _ => {}
@@ -96,8 +105,33 @@ fn parse_rels<R: Read + Seek>(xml: &str, zip: &mut ZipArchive<R>) -> Result<Rels
     }
 }
 
+/// Is this internal part compared by content (media, embeddings, charts)?
+pub fn is_content_part(path: &str) -> bool {
+    ["word/media/", "word/embeddings/", "word/charts/"].iter().any(|d| path.starts_with(d))
+}
+
+/// Map relationship IDs to a hash of their target. Embedded media and charts
+/// are hashed by content, so the same image matches across documents
+/// regardless of its file name or ID; everything else by target path/URL.
+fn hash_rels<R: Read + Seek>(rels: &[Rel], zip: &mut ZipArchive<R>) -> Result<Rels> {
+    let mut out = Rels::default();
+    for rel in rels {
+        let hash = if rel.external {
+            hash_bytes(rel.target.as_bytes())
+        } else {
+            let p = resolve(&rel.target);
+            match is_content_part(&p).then(|| read_bytes(zip, &p).ok()).flatten() {
+                Some(buf) => hash_bytes(&buf),
+                None => hash_bytes(p.as_bytes()),
+            }
+        };
+        out.insert(rel.id.clone(), hash);
+    }
+    Ok(out)
+}
+
 /// Resolve a relationship target relative to `word/`.
-fn resolve(target: &str) -> String {
+pub fn resolve(target: &str) -> String {
     if let Some(abs) = target.strip_prefix('/') {
         return abs.to_string();
     }

@@ -8,8 +8,8 @@ use xxf::model::Document;
 use xxf::render::{Style, render};
 
 fn compare(old: &str, new: &str) -> (Document, Document, Vec<BlockItem>) {
-    let a = load_bytes(&docx(old)).unwrap();
-    let b = load_bytes(&docx(new)).unwrap();
+    let a = load_bytes(&docx(old)).unwrap().doc;
+    let b = load_bytes(&docx(new)).unwrap().doc;
     let items = diff_blocks(&a.blocks, &b.blocks);
     (a, b, items)
 }
@@ -158,8 +158,8 @@ fn reformat_plus_trailing_delete_at_end_of_document() {
 const STYLES: &str = r#"<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"/><w:sz w:val="22"/><w:lang w:val="en-US"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="259" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Quote"><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:before="100" w:beforeAutospacing="1" w:after="100" w:afterAutospacing="1"/></w:pPr><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/><w:i/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Big"><w:basedOn w:val="Normal"/><w:rPr><w:sz w:val="40"/></w:rPr></w:style><w:style w:type="character" w:styleId="Strong"><w:rPr><w:b/><w:bCs/></w:rPr></w:style>"#;
 
 fn compare_styled(old: &str, new: &str) -> (Document, Document, Vec<BlockItem>) {
-    let a = load_bytes(&docx_with_styles(old, Some(STYLES))).unwrap();
-    let b = load_bytes(&docx_with_styles(new, Some(STYLES))).unwrap();
+    let a = load_bytes(&docx_with_styles(old, Some(STYLES))).unwrap().doc;
+    let b = load_bytes(&docx_with_styles(new, Some(STYLES))).unwrap().doc;
     let items = diff_blocks(&a.blocks, &b.blocks);
     (a, b, items)
 }

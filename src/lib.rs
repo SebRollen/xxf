@@ -12,6 +12,7 @@ pub mod docx;
 pub mod hash;
 pub mod model;
 pub mod parse;
+pub mod redline;
 pub mod render;
 pub mod styles;
 
