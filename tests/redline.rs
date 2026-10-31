@@ -6,7 +6,7 @@ mod common;
 
 use std::io::{Cursor, Read};
 
-use common::{docx, docx_with_parts, p, table};
+use common::{docx, docx_with_parts, document_xml, p, table, zip_parts};
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use xxf::compare::{Stats, diff_blocks, stats};
@@ -19,11 +19,12 @@ fn opts() -> Options {
     Options { author: "Tester & Co".into(), date: "2026-10-30T12:00:00Z".into() }
 }
 
-/// Paragraph texts in document order, descending into tables.
-fn texts(blocks: &[Block], out: &mut Vec<String>) {
+/// Paragraph texts in document order, descending into tables. The text hash
+/// is what the diff compares (hidden bookmark names normalized).
+fn texts(blocks: &[Block], out: &mut Vec<(u64, String)>) {
     for b in blocks {
         match b {
-            Block::Para(p) => out.push(p.text.clone()),
+            Block::Para(p) => out.push((p.text_hash, p.text.clone())),
             Block::Table(t) => {
                 for r in &t.rows {
                     for c in &r.cells {
@@ -36,7 +37,7 @@ fn texts(blocks: &[Block], out: &mut Vec<String>) {
     }
 }
 
-fn all_texts(s: &Source) -> Vec<String> {
+fn all_texts(s: &Source) -> Vec<(u64, String)> {
     let mut v = Vec::new();
     texts(&s.doc.blocks, &mut v);
     v
@@ -68,11 +69,19 @@ fn roundtrip_bytes(old_bytes: &[u8], new_bytes: &[u8]) -> (Vec<u8>, String) {
 /// `check_reject` is off when the new document already has tracked changes:
 /// rejecting everything then also rejects those.
 fn roundtrip_checked(old_bytes: &[u8], new_bytes: &[u8], check_reject: bool) -> (Vec<u8>, String) {
+    roundtrip_inner(old_bytes, new_bytes, check_reject, "word/document.xml")
+}
+
+fn roundtrip_checked_part(old_bytes: &[u8], new_bytes: &[u8], main: &str) -> (Vec<u8>, String) {
+    roundtrip_inner(old_bytes, new_bytes, true, main)
+}
+
+fn roundtrip_inner(old_bytes: &[u8], new_bytes: &[u8], check_reject: bool, main: &str) -> (Vec<u8>, String) {
     let old = load_bytes(old_bytes).unwrap();
     let new = load_bytes(new_bytes).unwrap();
     let items = diff_blocks(&old.doc.blocks, &new.doc.blocks);
     let out = write(&old, &new, &items, &opts()).unwrap();
-    let xml = part(&out, "word/document.xml");
+    let xml = part(&out, main);
     assert_well_formed(&xml);
 
     let accepted = load_bytes_with(out.clone(), Revisions::Accept).unwrap();
@@ -183,6 +192,44 @@ fn existing_tracked_changes_in_new_are_kept() {
     let new = r#"<w:p><w:r><w:t xml:space="preserve">Final </w:t></w:r><w:del w:id="1" w:author="x"><w:r><w:delText>draft </w:delText></w:r></w:del><w:r><w:t>text there.</w:t></w:r></w:p>"#;
     let xml = roundtrip_checked(&docx(&old), &docx(new), false).1;
     assert!(xml.contains(r#"<w:del w:id="1" w:author="x">"#), "{xml}");
+}
+
+#[test]
+fn deleted_first_row_and_first_cell_paragraph_stay_inside_the_table() {
+    let cell = |paras: &[&str]| -> String {
+        let ps: String = paras.iter().map(|t| p(t)).collect();
+        format!(r#"<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>{ps}</w:tc>"#)
+    };
+    let row = |cells: &[String]| format!("<w:tr>{}</w:tr>", cells.concat());
+    let tbl = |rows: &[String]| format!(r#"<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid>{}</w:tbl>"#, rows.concat());
+    let old = tbl(&[
+        row(&[cell(&["Header row going away"]), cell(&["Header two"])]),
+        row(&[cell(&["First paragraph to delete entirely", "Kept paragraph"]), cell(&["x"])]),
+    ]);
+    let new = tbl(&[row(&[cell(&["Kept paragraph"]), cell(&["x"])])]);
+    let xml = roundtrip(&old, &new);
+    let tbl_at = xml.find("<w:tbl>").unwrap();
+    assert!(xml.find("<w:tr>").unwrap() > tbl_at, "{xml}");
+    // Cell properties stay the first child of every cell.
+    assert_eq!(xml.matches("<w:tc>").count(), xml.matches("<w:tc><w:tcPr>").count(), "{xml}");
+}
+
+#[test]
+fn byte_order_mark_and_unconventional_main_part() {
+    let rels = |main: &str| -> Vec<u8> {
+        format!(r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="{main}"/></Relationships>"#).into_bytes()
+    };
+    let with_bom = |body: &str| -> Vec<u8> { [b"\xEF\xBB\xBF".as_slice(), document_xml(body).as_bytes()].concat() };
+    let old = zip_parts(&[
+        ("_rels/.rels", rels("word/trial.xml")),
+        ("word/trial.xml", with_bom(&[p("Same first."), p("Old second.")].concat())),
+    ]);
+    let new = zip_parts(&[
+        ("_rels/.rels", rels("word/trial.xml")),
+        ("word/trial.xml", with_bom(&[p("Same first."), p("New second.")].concat())),
+    ]);
+    let (out, _) = roundtrip_checked_part(&old, &new, "word/trial.xml");
+    assert!(part(&out, "word/trial.xml").contains("<w:delText"));
 }
 
 const PNG_OLD: &[u8] = b"\x89PNG old image bytes";

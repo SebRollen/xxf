@@ -56,3 +56,20 @@ pub fn table(rows: &[&[&str]]) -> String {
         .collect();
     format!("<w:tbl><w:tblPr/>{rows}</w:tbl>")
 }
+
+/// A package from raw parts.
+#[allow(dead_code)] // not every test binary uses it
+pub fn zip_parts(parts: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let mut z = ZipWriter::new(Cursor::new(Vec::new()));
+    for (name, content) in parts {
+        z.start_file(*name, SimpleFileOptions::default()).unwrap();
+        z.write_all(content).unwrap();
+    }
+    z.finish().unwrap().into_inner()
+}
+
+/// The `document.xml` text for a body.
+#[allow(dead_code)] // not every test binary uses it
+pub fn document_xml(body: &str) -> String {
+    format!(r#"<?xml version="1.0" encoding="UTF-8"?><w:document {NS}><w:body>{body}</w:body></w:document>"#)
+}

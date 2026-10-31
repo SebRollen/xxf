@@ -50,6 +50,9 @@ pub struct RunSrc {
     /// Content of `w:rPr`, if any.
     pub rpr: Option<Src>,
     pub children: Vec<RunChild>,
+    /// Not a `w:r`: a paragraph-level object (e.g. `m:oMath`) with a single
+    /// `Raw` child spanning the element.
+    pub bare: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -143,7 +146,7 @@ pub struct Row {
 #[derive(Debug)]
 pub struct Cell {
     pub span: Src,
-    /// Between the start and end tags (includes `w:tcPr`).
+    /// After the start tag and any `w:tcPr`, up to the end tag.
     pub content: Src,
     /// The whole `w:tcPr` element, if any.
     pub tcpr: Option<Src>,

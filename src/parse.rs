@@ -109,7 +109,7 @@ pub fn parse_document(xml: &str, rels: &Rels, styles: &Styles) -> Result<Documen
 }
 
 pub fn parse_document_with(xml: &str, rels: &Rels, styles: &Styles, mode: Revisions) -> Result<Document> {
-    let mut p = Parser { r: Reader::from_str(xml), xml, rels, res: Resolver::new(styles), mode };
+    let mut p = Parser { r: Reader::from_str(xml), xml, rels, res: Resolver::new(styles), mode, object_text: 0 };
     loop {
         match p.r.read_event()? {
             Event::Start(e) if e.name().as_ref() == b"w:body" => {
@@ -130,6 +130,8 @@ struct Parser<'a> {
     rels: &'a Rels,
     res: Resolver<'a>,
     mode: Revisions,
+    /// Text characters in the last subtree hashed by `hash_elem`.
+    object_text: usize,
 }
 
 fn is(name: &[u8], set: &[&[u8]]) -> bool {
@@ -171,6 +173,16 @@ impl<'a> Parser<'a> {
     fn inner(&mut self, e: &BytesStart) -> Result<&'a str> {
         let span = self.r.read_to_end(e.name())?;
         Ok(&self.xml[span.start as usize..span.end as usize])
+    }
+
+    /// A revision wrapper whose content is dropped in this mode.
+    fn removed_revision(&self, n: &[u8]) -> bool {
+        is(n, if self.mode == Revisions::Accept { DELETED } else { INSERTED })
+    }
+
+    /// A revision wrapper whose content is kept (unwrapped) in this mode.
+    fn kept_revision(&self, n: &[u8]) -> bool {
+        is(n, if self.mode == Revisions::Accept { INSERTED } else { DELETED })
     }
 
     fn transparent(&self, n: &[u8]) -> bool {
@@ -282,7 +294,12 @@ impl<'a> Parser<'a> {
             match self.next()? {
                 (s, Event::Start(e)) => match e.name().as_ref() {
                     b"w:trPr" | b"w:tblPrEx" => {
-                        props.u64(self.hash_elem(&e, false, true)?);
+                        // An element left empty after dropping revision marks
+                        // must hash like an absent one.
+                        let h = self.hash_elem(&e, false, true)?;
+                        if h != 0 {
+                            props.u64(h);
+                        }
                         if e.name().as_ref() == b"w:trPr" {
                             trpr = Some(s..self.pos());
                         } else {
@@ -295,7 +312,8 @@ impl<'a> Parser<'a> {
                         let (blocks, end) = self.blocks(b"w:tc", &mut tcpr)?;
                         let mut c = Cell::new(blocks, tcpr.as_ref().map_or(0, |t| t.0));
                         c.span = s..self.pos();
-                        c.content = stag_end..end;
+                        // Content starts after w:tcPr, so nothing is ever emitted before it.
+                        c.content = tcpr.as_ref().map_or(stag_end, |t| t.1.end)..end;
                         c.tcpr = tcpr.map(|t| t.1);
                         cells.push(c);
                     }
@@ -351,10 +369,18 @@ impl<'a> Parser<'a> {
                     n if self.skipped(n) => {
                         self.r.read_to_end(e.name())?;
                     }
-                    // e.g. m:oMath: treat the whole subtree as one inline object.
-                    _ => {
+                    // e.g. m:oMath: treat the whole subtree as one inline object,
+                    // recorded as a bare (non-w:r) run for the redline writer.
+                    n => {
                         let h = self.hash_elem(&e, false, false)?;
-                        b.object(h, 0);
+                        // An equation whose content was all removed by revisions is gone.
+                        if !(n.starts_with(b"m:") && self.object_text == 0) {
+                            let at = b.text.len() as u32;
+                            b.object(h, 0);
+                            let span = s..self.pos();
+                            let child = RunChild { span: span.clone(), text: at..b.text.len() as u32, kind: ChildKind::Raw };
+                            b.src_runs.push(RunSrc { span, rpr: None, children: vec![child], bare: true });
+                        }
                     }
                 },
                 (s, Event::Empty(e)) if e.name().as_ref() == b"w:pPr" => ppr_span = Some(s..self.pos()),
@@ -381,7 +407,7 @@ impl<'a> Parser<'a> {
 
     fn run(&mut self, start: u32, b: &mut ParaBuilder) -> Result<()> {
         let mut fmt = self.res.rpr(b.style.as_deref(), "")?;
-        let mut src = RunSrc { span: start..start, rpr: None, children: Vec::new() };
+        let mut src = RunSrc { span: start..start, rpr: None, children: Vec::new(), bare: false };
         let reject = self.mode == Revisions::Reject;
         loop {
             let (s, ev) = self.next()?;
@@ -483,28 +509,40 @@ impl<'a> Parser<'a> {
     /// Hash an element's normalized subtree. In `props` mode, revision history
     /// and proofing noise are excluded, and an element with no remaining
     /// content hashes to 0 so that `<w:rPr/>` equals no `w:rPr` at all.
+    ///
+    /// Outside `props` mode, tracked changes inside the subtree (e.g. in an
+    /// equation or a text box) are resolved per the revision mode; the
+    /// number of text characters that remain is left in `self.object_text`.
     fn hash_elem(&mut self, start: &BytesStart, empty: bool, props: bool) -> Result<u64> {
         let mut h = H::new();
         let mut items = self.hash_attrs(&mut h, start);
+        self.object_text = 0;
         if !empty {
-            let mut depth = 0usize;
+            // Per open element: was its start tag hashed (false for unwrapped revisions)?
+            let mut open: Vec<bool> = Vec::new();
             loop {
                 match self.r.read_event()? {
                     Event::Start(e) => {
                         let name = e.name();
-                        if is(name.as_ref(), IGNORED) || (props && is(name.as_ref(), PROP_NOISE)) {
+                        let n = name.as_ref();
+                        if is(n, IGNORED) || (props && is(n, PROP_NOISE)) || (!props && self.removed_revision(n)) {
                             self.r.read_to_end(name)?;
                             continue;
                         }
-                        depth += 1;
+                        if !props && self.kept_revision(n) {
+                            open.push(false);
+                            continue;
+                        }
+                        open.push(true);
                         items += 1;
                         h.u64(1);
-                        h.bytes(name.as_ref());
+                        h.bytes(n);
                         items += self.hash_attrs(&mut h, &e);
                     }
                     Event::Empty(e) => {
                         let name = e.name();
-                        if is(name.as_ref(), IGNORED) || (props && is(name.as_ref(), PROP_NOISE)) {
+                        let n = name.as_ref();
+                        if is(n, IGNORED) || (props && is(n, PROP_NOISE)) || (!props && self.removed_revision(n)) {
                             continue;
                         }
                         items += 1;
@@ -513,17 +551,16 @@ impl<'a> Parser<'a> {
                         items += self.hash_attrs(&mut h, &e);
                         h.u64(2);
                     }
-                    Event::End(_) => {
-                        if depth == 0 {
-                            break;
-                        }
-                        depth -= 1;
-                        h.u64(2);
-                    }
+                    Event::End(_) => match open.pop() {
+                        None => break,
+                        Some(true) => h.u64(2),
+                        Some(false) => {}
+                    },
                     Event::Text(t) => {
                         let s = t.unescape()?;
                         if !s.trim().is_empty() {
                             items += 1;
+                            self.object_text += s.len();
                             h.u64(3);
                             h.bytes(s.as_bytes());
                         }
@@ -630,9 +667,10 @@ impl ParaBuilder {
                 TokenKind::Punct
             };
             let e = chars.peek().map_or(text.len(), |&(i, _)| i);
+            let word = &text[s..e];
             let text_hash = match kind {
                 TokenKind::Object => objects.next().unwrap_or(0),
-                _ => hash_bytes(&text.as_bytes()[s..e]),
+                _ => hash_bytes(hidden_bookmark_kind(word).unwrap_or(word).as_bytes()),
             };
             tokens.push(Token { start: s as u32, end: e as u32, kind, text_hash, fmt: 0 });
         }
@@ -665,6 +703,17 @@ fn assign_fmt(tokens: &mut [Token], runs: &[(u32, u64)]) {
     }
 }
 
+/// Word generates hidden bookmark names like `_Toc234799435` or `_Ref1234`
+/// and renumbers them on save; field codes that cite them (`PAGEREF`,
+/// `REF`, `HYPERLINK \l`) would otherwise differ in every version. Such a
+/// name compares by its kind (`_Toc`) only.
+fn hidden_bookmark_kind(word: &str) -> Option<&str> {
+    let rest = word.strip_prefix('_')?;
+    let letters = rest.find(|c: char| !c.is_ascii_alphabetic())?;
+    let digits = &rest[letters..];
+    (letters > 0 && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())).then(|| &word[..letters + 1])
+}
+
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
@@ -672,4 +721,18 @@ fn is_word(c: char) -> bool {
 fn is_cjk(c: char) -> bool {
     matches!(c as u32,
         0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hidden_bookmark_kind;
+
+    #[test]
+    fn hidden_bookmark_names_compare_by_kind() {
+        assert_eq!(hidden_bookmark_kind("_Toc234799435"), Some("_Toc"));
+        assert_eq!(hidden_bookmark_kind("_Ref12"), Some("_Ref"));
+        for w in ["_Toc", "_GoBack", "Toc123", "_Toc12a", "_123", "snake_case1"] {
+            assert_eq!(hidden_bookmark_kind(w), None, "{w}");
+        }
+    }
 }

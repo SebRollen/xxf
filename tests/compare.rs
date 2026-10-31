@@ -220,3 +220,14 @@ fn empty_paragraphs_are_summarized_not_listed() {
     let out = report(&old, &new);
     assert_eq!(out, "\n0 changed, 0 inserted, 0 deleted, 0 moved (1 empty paragraphs added/removed, not shown)\n");
 }
+
+#[test]
+fn renumbered_hidden_bookmarks_in_field_codes_are_not_changes() {
+    let toc = |id: &str| {
+        format!(
+            r#"<w:p><w:r><w:t>1.1</w:t></w:r><w:r><w:tab/><w:t>Glossary</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGEREF {id} \h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>15</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#
+        )
+    };
+    let (a, b, items) = compare(&toc("_Toc234799436"), &toc("_Toc181818181"));
+    assert_eq!(stats(&a.blocks, &b.blocks, &items), Stats::default());
+}

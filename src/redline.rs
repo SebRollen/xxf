@@ -29,7 +29,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 use crate::Result;
 use crate::align::Step;
 use crate::compare::{BlockItem, CellDiff, Detail, ParaDiff, RowDetail, SpanKind, TableDiff};
-use crate::docx::{self, CONTENT_TYPES, MAIN_PART, MAIN_RELS, Rel, Source};
+use crate::docx::{self, CONTENT_TYPES, Rel, Source};
 use crate::hash::hash_bytes;
 use crate::model::*;
 
@@ -354,6 +354,22 @@ impl<'a, 'p> Emitter<'a, 'p> {
 
     /// Rebuild one new run, split where its text changes status.
     fn run(&mut self, p: &'a Para, run: &'a RunSrc, pc: &mut Pieces<'_, 'a>) {
+        if run.bare {
+            // A paragraph-level object can't go in a w:r or w:ins; an
+            // inserted equation is marked inside its m:oMath instead.
+            let ch = &run.children[0];
+            self.flush(pc);
+            self.due_deletions(pc, ch.text.start);
+            let raw = self.new_str(&ch.span);
+            if status_at(pc.segs, ch.text.start) == St::Ins {
+                let tag = if matches!(pc.mark, Mark::MoveTo(_)) { "w:moveTo" } else { "w:ins" };
+                let attrs = self.attrs();
+                self.out.push_str(&wrap_math(raw, &format!("<{tag} {attrs}>"), &format!("</{tag}>")));
+            } else {
+                self.out.push_str(raw);
+            }
+            return;
+        }
         pc.rpr = run.rpr.as_ref().map_or("", |r| self.new_str(r));
         for ch in &run.children {
             match ch.kind {
@@ -393,12 +409,7 @@ impl<'a, 'p> Emitter<'a, 'p> {
     fn piece(&mut self, pc: &mut Pieces<'_, 'a>, st: St, xml: &str, at: u32) {
         if pc.di < pc.dels.len() && pc.dels[pc.di].at <= at {
             self.flush(pc);
-            while pc.di < pc.dels.len() && pc.dels[pc.di].at <= at {
-                if let Some(o) = pc.old {
-                    self.del_runs(o, pc.dels[pc.di].old.clone(), false);
-                }
-                pc.di += 1;
-            }
+            self.due_deletions(pc, at);
         }
         match &mut pc.group {
             Some((g, buf)) if *g == st => buf.push_str(xml),
@@ -406,6 +417,16 @@ impl<'a, 'p> Emitter<'a, 'p> {
                 self.flush(pc);
                 pc.group = Some((st, xml.to_string()));
             }
+        }
+    }
+
+    /// Emit the deletions positioned at or before text offset `at`.
+    fn due_deletions(&mut self, pc: &mut Pieces<'_, 'a>, at: u32) {
+        while pc.di < pc.dels.len() && pc.dels[pc.di].at <= at {
+            if let Some(o) = pc.old {
+                self.del_runs(o, pc.dels[pc.di].old.clone(), false);
+            }
+            pc.di += 1;
         }
     }
 
@@ -438,6 +459,19 @@ impl<'a, 'p> Emitter<'a, 'p> {
             if moved { ("w:moveFrom", "w:t", "w:instrText") } else { ("w:del", "w:delText", "w:delInstrText") };
         let mut body = String::new();
         for run in &p.src.runs {
+            if run.bare {
+                // Equations are marked inside their m:oMath; other
+                // paragraph-level objects can't be marked and are dropped.
+                let ch = &run.children[0];
+                let raw = self.old_str(&ch.span);
+                if range.start <= ch.text.start && ch.text.end <= range.end && raw.contains("<m:oMath") {
+                    self.close_wrapper(wrap, &mut body);
+                    let attrs = self.attrs();
+                    let raw = self.pkg.remap(raw);
+                    self.out.push_str(&wrap_math(&raw, &format!("<{wrap} {attrs}>"), &format!("</{wrap}>")));
+                }
+                continue;
+            }
             let mut children = String::new();
             for ch in &run.children {
                 let (a, b) = (ch.text.start.max(range.start), ch.text.end.min(range.end));
@@ -452,8 +486,13 @@ impl<'a, 'p> Emitter<'a, 'p> {
                     }
                     ChildKind::Raw if a < b && a == ch.text.start && b == ch.text.end => {
                         let raw = self.old_str(&ch.span);
-                        // Note references point into the old notes part; drop them.
-                        if !raw.starts_with("<w:footnoteReference") && !raw.starts_with("<w:endnoteReference") {
+                        if raw.starts_with("<w:footnoteReference") || raw.starts_with("<w:endnoteReference") {
+                            // The note itself is carried into the new notes part;
+                            // if it can't be, the reference is dropped.
+                            if let Some(r) = self.pkg.note_ref(raw) {
+                                children.push_str(&r);
+                            }
+                        } else {
                             children.push_str(&self.pkg.remap(raw));
                         }
                     }
@@ -469,9 +508,15 @@ impl<'a, 'p> Emitter<'a, 'p> {
                 }
             }
         }
+        self.close_wrapper(wrap, &mut body);
+    }
+
+    /// Emit pending deleted runs inside one revision wrapper.
+    fn close_wrapper(&mut self, wrap: &str, body: &mut String) {
         if !body.is_empty() {
             let attrs = self.attrs();
             let _ = write!(self.out, "<{wrap} {attrs}>{body}</{wrap}>");
+            body.clear();
         }
     }
 
@@ -515,7 +560,10 @@ impl<'a, 'p> Emitter<'a, 'p> {
     // ---- tables ----
 
     fn changed_table(&mut self, a: &'a Table, b: &'a Table, d: &TableDiff) {
-        let mut cur = b.span.start;
+        // Table properties and grid first: deleted rows must come after them.
+        let head_end = b.rows.first().map_or(b.span.start, |r| r.span.start);
+        self.copy(b.span.start..head_end);
+        let mut cur = head_end;
         for it in &d.rows {
             match it.step {
                 Step::Equal(_, j) => {
@@ -740,6 +788,26 @@ fn remove_elem(s: &str, name: &str) -> String {
     out
 }
 
+/// Wrap the content of every `m:oMath` in `raw` in a revision element
+/// (`w:ins`/`w:del` may appear inside an equation, not around it).
+fn wrap_math(raw: &str, open: &str, close: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 64);
+    let mut rest = raw;
+    while let Some(i) = find_tag(rest, "<m:oMath") {
+        let gt = i + rest[i..].find('>').map_or(0, |g| g + 1);
+        if rest[i..gt].ends_with("/>") {
+            out.push_str(&rest[..gt]);
+            rest = &rest[gt..];
+            continue;
+        }
+        let end = rest[gt..].find("</m:oMath>").map_or(rest.len(), |e| gt + e);
+        let _ = write!(out, "{}{open}{}{close}", &rest[..gt], &rest[gt..end]);
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Insert `ins` before the first of `tags` found in `s`, or at the end.
 fn insert_before_first(s: &str, tags: &[&str], ins: &str) -> String {
     let at = tags.iter().filter_map(|t| find_tag(s, t)).min().unwrap_or(s.len());
@@ -791,6 +859,8 @@ fn map_attr(s: &str, tag_open: &str, attr: &str, mut f: impl FnMut(&str) -> Opti
 
 /// The output package: the new .docx plus whatever old content needs.
 struct Package<'a> {
+    old: &'a Source,
+    new: &'a Source,
     old_zip: ZipArchive<Cursor<&'a [u8]>>,
     new_zip: ZipArchive<Cursor<&'a [u8]>>,
     old_rels: FxHashMap<String, Rel>,
@@ -808,6 +878,25 @@ struct Package<'a> {
     new_types_xml: String,
     added_types: Vec<(String, String)>,
     next_docpr: u32,
+    /// Footnotes and endnotes carried over for deleted references, by kind.
+    notes: FxHashMap<&'static str, Notes>,
+}
+
+/// A notes part (footnotes or endnotes) receiving notes from the old document.
+struct Notes {
+    /// The part in the new package, if it has one.
+    part: Option<String>,
+    old_xml: String,
+    new_xml: String,
+    /// Notes to append.
+    added: String,
+    next_id: i64,
+    /// Old note ID → new note ID.
+    map: FxHashMap<String, String>,
+    /// The new package has no notes part: the old one is copied whole (if it
+    /// needs no relationships), keeping note IDs, once a reference uses it.
+    copy_old: Option<(String, String)>,
+    copied: bool,
 }
 
 #[derive(Default)]
@@ -874,11 +963,11 @@ impl<'a> Package<'a> {
     fn new(old: &'a Source, new: &'a Source) -> Result<Self> {
         let mut old_zip = ZipArchive::new(Cursor::new(old.zip.as_slice()))?;
         let mut new_zip = ZipArchive::new(Cursor::new(new.zip.as_slice()))?;
-        let old_rels = match docx::read_string(&mut old_zip, MAIN_RELS) {
+        let old_rels = match docx::read_string(&mut old_zip, &old.main_rels) {
             Ok(x) => docx::parse_rels(&x)?.into_iter().map(|r| (r.id.clone(), r)).collect(),
             Err(_) => FxHashMap::default(),
         };
-        let new_rels_xml = docx::read_string(&mut new_zip, MAIN_RELS).ok();
+        let new_rels_xml = docx::read_string(&mut new_zip, &new.main_rels).ok();
         let new_rels = match &new_rels_xml {
             Some(x) => docx::parse_rels(x)?,
             None => Vec::new(),
@@ -887,6 +976,8 @@ impl<'a> Package<'a> {
         let new_types_xml = docx::read_string(&mut new_zip, CONTENT_TYPES).unwrap_or_default();
         let new_types = ContentTypes::parse(&new_types_xml)?;
         Ok(Self {
+            old,
+            new,
             old_zip,
             new_zip,
             old_rels,
@@ -901,6 +992,7 @@ impl<'a> Package<'a> {
             new_types_xml,
             added_types: Vec::new(),
             next_docpr: 1_000_000,
+            notes: FxHashMap::default(),
         })
     }
 
@@ -935,6 +1027,79 @@ impl<'a> Package<'a> {
         })
     }
 
+    /// Rewrite an old footnote/endnote reference for the new package, copying
+    /// the note it cites into the new notes part. None if that can't be done
+    /// (no notes part in the new package, or the note has relationships).
+    fn note_ref(&mut self, raw: &str) -> Option<String> {
+        let kind = if raw.starts_with("<w:footnoteReference") { "footnote" } else { "endnote" };
+        let id = attr_value(raw, "w:id")?;
+        if !self.notes.contains_key(kind) {
+            let n = self.load_notes(kind);
+            self.notes.insert(kind, n);
+        }
+        let n = self.notes.get_mut(kind)?;
+        if let Some((old_part, typ)) = n.copy_old.clone() {
+            if !n.copied {
+                n.copied = true;
+                let new_part = self.unique_part(&old_part);
+                if !self.new_types.overrides.contains_key(&new_part) {
+                    let t = self.old_types.type_of(&old_part).cloned().unwrap_or_else(|| guess_type(&old_part).to_string());
+                    self.added_types.push((new_part.clone(), t));
+                }
+                self.copies.push((old_part, new_part.clone()));
+                let dir = format!("{}/", docx::dir_of(&self.new.main));
+                let target = new_part.strip_prefix(dir.as_str()).map_or_else(|| format!("/{new_part}"), str::to_string);
+                self.add_rel(typ, target, false);
+            }
+            return Some(raw.to_string());
+        }
+        n.part.as_ref()?;
+        let new_id = match n.map.get(&id) {
+            Some(m) => m.clone(),
+            None => {
+                let inner = inner_of(find_note(&n.old_xml, kind, &id)?);
+                if inner.contains(" r:") {
+                    return None;
+                }
+                let nid = n.next_id.to_string();
+                n.next_id += 1;
+                let _ = write!(n.added, r#"<w:{kind} w:id="{nid}">{inner}</w:{kind}>"#);
+                n.map.insert(id, nid.clone());
+                nid
+            }
+        };
+        Some(map_attr(raw, &format!("<w:{kind}Reference "), "w:id", |_| Some(new_id.clone())))
+    }
+
+    fn load_notes(&mut self, kind: &str) -> Notes {
+        let suffix = format!("/{kind}s");
+        let find = |mut rels: Vec<&Rel>, main: &str| {
+            rels.retain(|r| !r.external && r.typ.ends_with(&suffix));
+            rels.first().map(|r| (docx::resolve(docx::dir_of(main), &r.target), r.typ.clone()))
+        };
+        let old_part = find(self.old_rels.values().collect(), &self.old.main);
+        let new_part = find(self.new_rels.iter().collect(), &self.new.main).map(|p| p.0);
+        let old_xml = old_part.as_ref().and_then(|p| docx::read_string(&mut self.old_zip, &p.0).ok()).unwrap_or_default();
+        let new_xml = new_part.as_ref().and_then(|p| docx::read_string(&mut self.new_zip, p).ok()).unwrap_or_default();
+        let mut max_id = 0i64;
+        let _ = map_attr(&new_xml, &format!("<w:{kind} "), "w:id", |v| {
+            max_id = max_id.max(v.parse().unwrap_or(0));
+            None
+        });
+        let part = new_part.filter(|_| !new_xml.is_empty());
+        let copy_old = old_part.filter(|_| part.is_none() && !old_xml.is_empty() && !old_xml.contains(" r:"));
+        Notes {
+            part,
+            old_xml,
+            new_xml,
+            added: String::new(),
+            next_id: max_id + 1,
+            map: FxHashMap::default(),
+            copy_old,
+            copied: false,
+        }
+    }
+
     fn map_id(&mut self, id: &str) -> Option<String> {
         if let Some(v) = self.map.get(id) {
             return v.clone();
@@ -952,13 +1117,13 @@ impl<'a> Package<'a> {
             }
             return Some(self.add_rel(rel.typ, rel.target, true));
         }
-        let old_part = docx::resolve(&rel.target);
+        let old_part = docx::resolve(docx::dir_of(&self.old.main), &rel.target);
         let bytes = docx::read_bytes(&mut self.old_zip, &old_part).ok()?;
         let hash = hash_bytes(&bytes);
         // Reuse an identical part already in the new package.
         let candidates: Vec<Rel> = self.new_rels.iter().filter(|n| !n.external && n.typ == rel.typ).cloned().collect();
         for n in candidates {
-            let part = docx::resolve(&n.target);
+            let part = docx::resolve(docx::dir_of(&self.new.main), &n.target);
             let h = match self.new_hashes.get(&part) {
                 Some(h) => *h,
                 None => {
@@ -977,7 +1142,8 @@ impl<'a> Package<'a> {
             self.added_types.push((new_part.clone(), typ));
         }
         self.copies.push((old_part, new_part.clone()));
-        let target = new_part.strip_prefix("word/").map_or_else(|| format!("/{new_part}"), str::to_string);
+        let dir = format!("{}/", docx::dir_of(&self.new.main));
+        let target = new_part.strip_prefix(dir.as_str()).map_or_else(|| format!("/{new_part}"), str::to_string);
         Some(self.add_rel(rel.typ, target, false))
     }
 
@@ -1035,16 +1201,18 @@ impl<'a> Package<'a> {
         for i in 0..self.new_zip.len() {
             let f = self.new_zip.by_index_raw(i)?;
             let name = f.name().to_string();
+            let notes = self.notes.iter().find(|(_, n)| n.part.as_deref() == Some(name.as_str()) && !n.added.is_empty());
+            let notes_xml = notes.map(|(kind, n)| insert_at_close(&n.new_xml, &format!("</w:{kind}s>"), &n.added));
             let replacement = match name.as_str() {
-                MAIN_PART => Some(document_xml),
-                MAIN_RELS => rels.as_deref(),
+                n if n == self.new.main => Some(document_xml),
+                n if n == self.new.main_rels => rels.as_deref(),
                 CONTENT_TYPES => types.as_deref(),
-                _ => None,
+                _ => notes_xml.as_deref(),
             };
             match replacement {
                 Some(content) => {
                     drop(f);
-                    wrote_rels |= name == MAIN_RELS;
+                    wrote_rels |= name == self.new.main_rels;
                     w.start_file(name, deflate)?;
                     w.write_all(content.as_bytes())?;
                 }
@@ -1052,7 +1220,7 @@ impl<'a> Package<'a> {
             }
         }
         if let (Some(r), false) = (&rels, wrote_rels) {
-            w.start_file(MAIN_RELS, deflate)?;
+            w.start_file(self.new.main_rels.as_str(), deflate)?;
             w.write_all(r.as_bytes())?;
         }
         for (old_part, new_part) in &self.copies {
@@ -1063,6 +1231,32 @@ impl<'a> Package<'a> {
         }
         Ok(w.finish()?.into_inner())
     }
+}
+
+/// Value of attribute `name` in a start tag.
+fn attr_value(tag: &str, name: &str) -> Option<String> {
+    let needle = format!(r#" {name}=""#);
+    let i = tag.find(&needle)? + needle.len();
+    Some(tag[i..i + tag[i..].find('"')?].to_string())
+}
+
+/// The whole `w:footnote`/`w:endnote` element with the given ID.
+fn find_note<'x>(xml: &'x str, kind: &str, id: &str) -> Option<&'x str> {
+    let (open, close) = (format!("<w:{kind}"), format!("</w:{kind}>"));
+    let mut from = 0;
+    while let Some(i) = find_tag(&xml[from..], &open) {
+        let start = from + i;
+        let tag_end = start + xml[start..].find('>')? + 1;
+        if attr_value(&xml[start..tag_end], "w:id").as_deref() == Some(id) {
+            if xml[start..tag_end].ends_with("/>") {
+                return Some(&xml[start..tag_end]);
+            }
+            let end = tag_end + xml[tag_end..].find(&close)? + close.len();
+            return Some(&xml[start..end]);
+        }
+        from = tag_end;
+    }
+    None
 }
 
 fn insert_at_close(xml: &str, close: &str, add: &str) -> String {

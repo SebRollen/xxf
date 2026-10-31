@@ -44,7 +44,7 @@ const SIMILARITY: f64 = 0.5;
 /// Fraction of the shorter unit's words that must appear in the longer one
 /// for containment to count as similarity.
 const CONTAINMENT: f64 = 0.8;
-/// Hunks larger than this many old×new pairs skip similarity pairing.
+/// Hunks larger than this many old×new pairs are split before pairing.
 const MAX_PAIR_CELLS: usize = 1 << 16;
 /// Units with fewer words than this are too generic to call moves.
 const MIN_MOVE_WORDS: usize = 3;
@@ -124,6 +124,15 @@ pub fn similarity<T: Unit>(a: &T, b: &T) -> f64 {
 
 fn pair_similar<T: Unit>(old: &[T], new: &[T], or: Range<usize>, nr: Range<usize>, steps: &mut Vec<Step>) {
     let (n, m) = (or.len(), nr.len());
+    if n * m > MAX_PAIR_CELLS && n > 1 && m > 1 {
+        // Too big for the full DP: split both sides at proportional midpoints
+        // and pair each half separately. Pairs across the split are lost, but
+        // large hunks are usually long runs of similar edits in order.
+        let (hn, hm) = (n / 2, m / 2);
+        pair_similar(old, new, or.start..or.start + hn, nr.start..nr.start + hm, steps);
+        pair_similar(old, new, or.start + hn..or.end, nr.start + hm..nr.end, steps);
+        return;
+    }
     let mut pairs = Vec::new();
     let lone_short_pair = n == 1 && m == 1 && {
         let (a, b) = (&old[or.start], &new[nr.start]);
